@@ -34,6 +34,24 @@ const defaultID3: ID3Tags = {
   coverUrl: ""
 };
 
+function buildAudioEndpoint(url: string, format: string, bitrate: number, settings: AudioSettings, tags?: Partial<ID3Tags>) {
+  const params = new URLSearchParams({
+    url,
+    format,
+    bitrate: String(bitrate),
+    sampleRate: String(settings.sampleRate),
+    trimStart: String(settings.trimStart),
+    trimEnd: String(settings.trimEnd),
+    volumeBoost: String(settings.volumeBoost),
+    fadeIn: String(settings.fadeIn),
+    fadeOut: String(settings.fadeOut),
+    equalizer: settings.equalizer,
+    title: tags?.title || "Audio"
+  });
+
+  return `/api/generate-audio?${params.toString()}`;
+}
+
 const PRESET_PLAYLISTS = [
   { name: "Lofi Focus Beats", url: "https://www.youtube.com/playlist?list=PLofmCYwrCzYF8-c5Mh2o9wL5b7JrkZ1sX" },
   { name: "Retro Synthwave", url: "https://www.youtube.com/playlist?list=PLz5fALZ0-mGsmM-Y_6-pU_O2VnLoxV3qH" },
@@ -57,7 +75,6 @@ export default function App() {
   const [activeQueueIndex, setActiveQueueIndex] = useState(-1);
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
   const [isAutoTuningQueue, setIsAutoTuningQueue] = useState(false);
-  const [isQuotaExceeded, setIsQuotaExceeded] = useState(false);
 
   // Operational states
   const [isFetchingMetadata, setIsFetchingMetadata] = useState(false);
@@ -143,7 +160,7 @@ export default function App() {
         trimEnd: data.durationSeconds || 220
       }));
 
-      // Trigger automatic tag optimization via Gemini
+      // Trigger automatic local tag cleanup
       triggerTagOptimization(data.title, data.author);
 
     } catch (err: any) {
@@ -154,7 +171,7 @@ export default function App() {
     }
   };
 
-  // Tag optimization via backend Gemini endpoint
+  // Tag optimization via backend local cleanup endpoint
   const triggerTagOptimization = async (title: string, author: string) => {
     setIsOptimizingTags(true);
     try {
@@ -163,10 +180,6 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title, author })
       });
-
-      if (response.headers.get("X-Gemini-Quota-Exceeded") === "true") {
-        setIsQuotaExceeded(true);
-      }
 
       if (response.ok) {
         const optimized = await response.json();
@@ -233,7 +246,7 @@ export default function App() {
 
     setIsFetchingPlaylist(true);
     setErrorMsg(null);
-    setLogs(prev => [...prev, `AI_PLAYLIST_PARSER: Scanning YouTube playlist (limit: ${playlistLimit}) via Google Search Grounding: ${playlistUrl}...`]);
+    setLogs(prev => [...prev, `PLAYLIST_PARSER: Scanning YouTube playlist (limit: ${playlistLimit}): ${playlistUrl}...`]);
 
     try {
       const response = await fetch("/api/playlist", {
@@ -241,10 +254,6 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: playlistUrl, limit: playlistLimit })
       });
-
-      if (response.headers.get("X-Gemini-Quota-Exceeded") === "true") {
-        setIsQuotaExceeded(true);
-      }
 
       if (!response.ok) {
         throw new Error("Failed to extract videos from the specified playlist.");
@@ -267,7 +276,7 @@ export default function App() {
       setQueue(prev => [...prev, ...newItems]);
       setLogs(prev => [
         ...prev, 
-        `AI_PLAYLIST_PARSER: Discovered and injected ${tracks.length} active tracks into the batch conversion list.`
+        `PLAYLIST_PARSER: Discovered and injected ${tracks.length} active tracks into the batch conversion list.`
       ]);
       setPlaylistUrl(""); // Clear input on success
     } catch (err: any) {
@@ -296,7 +305,7 @@ export default function App() {
     setLogs(prev => [...prev, "QUEUE: Transcoding queue slate cleared."]);
   };
 
-  // 6. Bulk AI Smart-Tuning optimization using Gemini Search & Clean ID3 field structure
+  // 6. Bulk local Smart-Tuning cleanup for ID3 field structure
   const handleAutoTuneQueue = async () => {
     if (queue.length === 0) return;
     setIsAutoTuningQueue(true);
@@ -388,7 +397,7 @@ export default function App() {
         thumbnailUrl: finalThumb,
         status: 'optimizing_tags' 
       } : item));
-      setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] OPTIMIZING_TAGS: Cleaning video formatting noise via Gemini Studio...`]);
+      setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] OPTIMIZING_TAGS: Cleaning video formatting noise locally...`]);
 
       try {
         const tagRes = await fetch("/api/optimize-tags", {
@@ -426,7 +435,10 @@ export default function App() {
           
           // Trigger actual download
           try {
-            const endpoint = `/api/generate-audio?url=${encodeURIComponent(activeItem.url)}&format=${activeItem.format}&bitrate=${activeItem.bitrate}`;
+            const endpoint = buildAudioEndpoint(activeItem.url, activeItem.format, activeItem.bitrate, settings, {
+              title: finalTitle,
+              artist: finalArtist
+            });
             const audioRes = await fetch(endpoint);
             if (audioRes.ok) {
               const blob = await audioRes.blob();
@@ -506,7 +518,7 @@ export default function App() {
         clearInterval(interval);
         
         // Formulate backend request to download active custom synth stream
-        const endpoint = `/api/generate-audio?url=${encodeURIComponent(videoMetadata?.url || youtubeUrl)}&format=${settings.format}&bitrate=${settings.bitrate}&sampleRate=${settings.sampleRate}`;
+        const endpoint = buildAudioEndpoint(videoMetadata?.url || youtubeUrl, settings.format, settings.bitrate, settings, tags);
         
         try {
           // Prefetch the audio to create a local Blob for on-screen playback preview
@@ -607,7 +619,7 @@ export default function App() {
         className="pointer-events-none fixed top-[40%] left-[50%] w-[400px] h-[400px] rounded-full bg-[#00ff9d]/3 blur-[160px] z-0"
       />
       
-      {/* Fullscreen Interactive AI-Grounding Single Video Load Screen */}
+      {/* Fullscreen single video load screen */}
       <AnimatePresence>
         {isFetchingMetadata && (
           <motion.div
@@ -682,7 +694,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Fullscreen Interactive AI-Grounding Playlist Parser Load Screen */}
+      {/* Fullscreen playlist parser load screen */}
       <AnimatePresence>
         {isFetchingPlaylist && (
           <motion.div
@@ -722,7 +734,7 @@ export default function App() {
                   AI PLAYLIST BATCH PARSER
                 </span>
                 <h3 className="text-xl font-heading font-black text-white leading-tight">
-                  Grounding Playlist Video Tracks...
+                  Loading Playlist Video Tracks...
                 </h3>
                 <p className="text-xs text-zinc-400 max-w-sm mt-1 leading-relaxed">
                   Scanning YouTube playlist feed, evaluating embedded tracks, and injecting item entries into the batch converter queue.
@@ -761,7 +773,7 @@ export default function App() {
                 SONIC<span className="text-[#ff4e00]">MP3</span>
               </h1>
               <span className="text-[10.5px] font-semibold text-zinc-500 font-mono tracking-wider uppercase leading-none mt-0.5">
-                Powered by Gemini AI & Audio DSP Engine
+                Powered by Local DSP & YouTube Search
               </span>
             </div>
           </div>
@@ -789,32 +801,6 @@ export default function App() {
           </div>
         </div>
       </motion.header>
-
-      {/* Gemini Rate-Limit or Quota Warn Banner */}
-      {isQuotaExceeded && (
-        <div className="bg-gradient-to-r from-[#ff4e00]/10 via-[#ff6a00]/5 to-transparent border border-[#ff4e00]/20 py-3.5 px-6 relative z-30 flex flex-col sm:flex-row sm:items-center justify-between gap-3 max-w-7xl mx-auto w-[calc(100%-2rem)] mt-4 rounded-xl">
-          <div className="flex items-center gap-2.5">
-            <div className="p-1.5 bg-[#ff4e00]/25 rounded-lg shrink-0">
-              <Sparkles className="w-4 h-4 text-[#ff8c00] animate-pulse" />
-            </div>
-            <div>
-              <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono">
-                Gemini API Quota Exhausted (Safe Mode Engaged)
-              </h4>
-              <p className="text-[11px] text-zinc-400 mt-0.5">
-                The Gemini AI rate limit has been reached, but don't worry! SonicMP3 is utilizing high-fidelity offline/procedural fallback streams. Transcoding & downloads remain 100% active.
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setIsQuotaExceeded(false)}
-            className="text-[10px] uppercase font-bold text-zinc-400 hover:text-white bg-white/5 border border-white/10 px-3 py-1.5 rounded-lg transition-colors shrink-0 cursor-pointer"
-          >
-            Dismiss Alert
-          </button>
-        </div>
-      )}
 
       {/* Main Content Area */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-8 md:px-12 grid grid-cols-1 lg:grid-cols-12 gap-8 relative z-10">
@@ -985,7 +971,7 @@ export default function App() {
                       {isFetchingPlaylist ? (
                         <>
                           <span className="w-4 h-4 border-2 border-black/30 border-t-black rounded-full animate-spin"></span>
-                          Grounding Track List...
+                          Playlist Track List...
                         </>
                       ) : (
                         <>
@@ -1074,7 +1060,7 @@ export default function App() {
                   </div>
 
                   <p className="text-[11px] text-zinc-500 font-sans leading-relaxed">
-                    <span className="text-[#ff4e00] font-bold">AI Google Grounding:</span> Our pipeline scans complex playlist URLs, maps all embedded tracks, and appends them simultaneously with your configured options to the batch queue.
+                    <span className="text-[#ff4e00] font-bold">YouTube playlist scan:</span> The pipeline scans playlist URLs, maps embedded tracks, and appends them with your configured options to the batch queue.
                   </p>
                 </motion.div>
               )}
@@ -1519,7 +1505,6 @@ export default function App() {
           <ProactiveSearch
             onSelectResult={handleLoadMetadata}
             onAddToQueue={handleAddUrlToQueue}
-            onQuotaExceeded={() => setIsQuotaExceeded(true)}
             isLoading={isSearching}
             setIsLoading={setIsSearching}
           />
@@ -1607,7 +1592,10 @@ export default function App() {
                     </div>
                     <button
                       onClick={() => {
-                        const ep = `/api/generate-audio?url=${encodeURIComponent(item.url)}&format=${item.format}&bitrate=${item.bitrate}`;
+                        const ep = buildAudioEndpoint(item.url, item.format, item.bitrate, settings, {
+                          title: item.title,
+                          artist: item.artist
+                        });
                         const a = document.createElement("a");
                         a.href = ep;
                         a.download = `${item.title.replace(/\s+/g,"_")}.${item.format}`;

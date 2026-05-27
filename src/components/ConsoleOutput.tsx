@@ -69,7 +69,7 @@ export default function ConsoleOutput({ logs }: ConsoleOutputProps) {
             <span className={`${
               log.includes("ERROR") ? "text-red-400 font-bold" :
               log.includes("COMPLETED") || log.includes("SUCCESS") ? "text-[#00ff9d] font-bold" :
-              log.includes("Optimizer") || log.includes("Gemini") ? "text-[#ffaa00] font-semibold" :
+              log.includes("Optimizer") || log.includes("OPTIMIZING_TAGS") ? "text-[#ffaa00] font-semibold" :
               "text-zinc-300"
             }`}>
               {log}

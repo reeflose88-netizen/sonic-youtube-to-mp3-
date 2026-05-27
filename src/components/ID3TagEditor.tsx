@@ -45,7 +45,7 @@ export default function ID3TagEditor({
             className="flex items-center gap-1.5 px-3 py-1.5 bg-[#ff4e00]/10 hover:bg-[#ff4e00]/20 text-[#ff8c00] text-xs font-semibold rounded-xl border border-[#ff4e00]/20 transition-all cursor-pointer disabled:opacity-60"
           >
             <Sparkles className={`w-3.5 h-3.5 ${isOptimizing ? "animate-spin text-[#ff8c00]" : "text-[#ff4e00]"}`} />
-            {isOptimizing ? "Optimizing tags..." : "Gemini AI Optimize"}
+            {isOptimizing ? "Optimizing tags..." : "Auto Optimize"}
           </button>
         )}
       </div>

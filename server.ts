@@ -1,40 +1,99 @@
 import express from "express";
+import fs from "fs";
+import { promises as fsp } from "fs";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
-import { spawn, execFile } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import ytpl from "ytpl";
 
 const execFileAsync = promisify(execFile);
 
-// Set standard user agent for AI Studio
-const apiKey = process.env.GEMINI_API_KEY;
-let ai: GoogleGenAI | null = null;
+const SUPPORTED_FORMATS = ["mp3", "wav", "aac", "flac", "m4a", "ogg"] as const;
+type SupportedFormat = typeof SUPPORTED_FORMATS[number];
 
-if (apiKey) {
-  try {
-    ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
-    });
-  } catch (err) {
-    console.error("Failed to initialize GoogleGenAI:", err);
-  }
+const AUDIO_CONTENT_TYPES: Record<SupportedFormat, string> = {
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  aac: "audio/aac",
+  flac: "audio/flac",
+  m4a: "audio/mp4",
+  ogg: "audio/ogg"
+};
+
+const YTDLP_AUDIO_FORMATS: Record<SupportedFormat, string> = {
+  mp3: "mp3",
+  wav: "wav",
+  aac: "aac",
+  flac: "flac",
+  m4a: "m4a",
+  ogg: "vorbis"
+};
+
+const EQ_FILTERS: Record<string, string> = {
+  bass: "bass=g=6",
+  vocal: "equalizer=f=1200:t=q:w=1:g=4",
+  treble: "treble=g=5",
+  instrumental: "acompressor=threshold=-18dB:ratio=2:attack=10:release=200",
+  lofi: "lowpass=f=9000,highpass=f=120,acompressor=threshold=-16dB:ratio=3"
+};
+
+function isSupportedFormat(format: string): format is SupportedFormat {
+  return SUPPORTED_FORMATS.includes(format as SupportedFormat);
 }
 
-function isQuotaExceededError(err: any): boolean {
-  if (!err) return false;
-  const errMsg = String(err.message || err.stack || err || "").toLowerCase();
-  const errCode = err.status || err.code || (err.error && err.error.code);
-  return errCode === 429 ||
-         errMsg.includes("429") ||
-         errMsg.includes("resource_exhausted") ||
-         errMsg.includes("quota");
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function getSafeFilename(name: string, fallback = "audio"): string {
+  return (name || fallback)
+    .replace(/[<>:"/\\|?*\r\n]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .substring(0, 100) || fallback;
+}
+
+function buildLocalTags(rawTitle: string, rawAuthor = "Unknown Artist") {
+  const yearMatch = rawTitle.match(/\b(19|20)\d{2}\b/);
+  let title = rawTitle
+    .replace(/\[[^\]]*?\]|\([^)]*?\)/g, " ")
+    .replace(/\b(official|music|video|audio|lyrics?|lyric|hd|hq|4k|mv|visualizer|remaster(?:ed)?)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  let artist = rawAuthor || "Unknown Artist";
+
+  const splitMatch = title.match(/^(.+?)\s[-–—]\s(.+)$/);
+  if (splitMatch && splitMatch[1].length <= 80 && splitMatch[2].length <= 120) {
+    artist = splitMatch[1].trim();
+    title = splitMatch[2].trim();
+  }
+
+  title = title
+    .replace(/\bfeat\.?\s+/gi, "ft. ")
+    .replace(/\s+/g, " ")
+    .trim() || rawTitle || "Unknown Track";
+
+  const lowered = `${title} ${artist}`.toLowerCase();
+  const genre =
+    lowered.includes("lofi") || lowered.includes("lo-fi") ? "Lo-Fi" :
+    lowered.includes("ambient") ? "Ambient" :
+    lowered.includes("jazz") ? "Jazz" :
+    lowered.includes("hip hop") || lowered.includes("rap") ? "Hip Hop" :
+    lowered.includes("rock") ? "Rock" :
+    lowered.includes("electronic") || lowered.includes("synth") || lowered.includes("edm") ? "Electronic" :
+    lowered.includes("podcast") ? "Podcast" :
+    "Pop";
+
+  return {
+    title,
+    artist,
+    album: "Single",
+    genre,
+    year: yearMatch?.[0] || new Date().getFullYear().toString()
+  };
 }
 
 async function startServer() {
@@ -108,7 +167,7 @@ async function startServer() {
     return "YouTube Audio Stream";
   }
 
-  // 2. Query Gemini to structure and optimize ID3 tags
+  // 2. Local ID3 cleanup. No API key, quota, or network call required.
   app.post("/api/optimize-tags", async (req, res) => {
     try {
       const { title, author } = req.body;
@@ -116,68 +175,9 @@ async function startServer() {
         return res.status(400).json({ error: "Video title is required for optimization." });
       }
 
-      const defaultTags = {
-        title: title.replace(/\[.*?\]|\(.*?\)|Official Music Video|Official Audio|Video|HD|Lyrics|mv|feat\./gi, "").trim(),
-        artist: author || "Unknown Artist",
-        album: "Single",
-        genre: "Pop",
-        year: new Date().getFullYear().toString()
-      };
-
-      if (!ai) {
-        // Fallback if AI not initialized
-        return res.json(defaultTags);
-      }
-
-      const prompt = `Analyze this YouTube video title: "${title}" by creator: "${author || 'Unknown'}".
-      Extract clean ID3 tag fields in strict JSON format. Clean up extra video-specific tags like [Official Video], (Lyrics), HD, etc.
-      Provide values for these keys:
-      1. title (the true song or track title)
-      2. artist (the artist, singer or producer)
-      3. album (the album name. If unknown, predict a stylish album name or keep it as 'Single' or a sensible title)
-      4. genre (a classic genre, e.g. Rock, Pop, Electronic, Hip Hop, Jazz, R&B, Lo-Fi, Ambient, Podcast)
-      5. year (the year of release, return a 4-digit string, or estimate if unknown)
-
-      Your response MUST be valid JSON only. Keep values concise.`;
-
-      const aiResponse = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              artist: { type: Type.STRING },
-              album: { type: Type.STRING },
-              genre: { type: Type.STRING },
-              year: { type: Type.STRING }
-            },
-            required: ["title", "artist", "album", "genre", "year"]
-          }
-        }
-      });
-
-      const text = aiResponse.text;
-      if (text) {
-        const parsed = JSON.parse(text.trim());
-        return res.json({
-          title: parsed.title || defaultTags.title,
-          artist: parsed.artist || defaultTags.artist,
-          album: parsed.album || defaultTags.album,
-          genre: parsed.genre || defaultTags.genre,
-          year: parsed.year || defaultTags.year
-        });
-      }
-
-      res.json(defaultTags);
+      res.json(buildLocalTags(String(title), String(author || "")));
     } catch (err) {
       console.error("Optimize tags error:", err);
-      if (isQuotaExceededError(err)) {
-        res.setHeader("X-Gemini-Quota-Exceeded", "true");
-      }
-      // Fallback
       res.json({
         title: req.body.title || "Unknown Track",
         artist: req.body.author || "Unknown Artist",
@@ -188,7 +188,7 @@ async function startServer() {
     }
   });
 
-  // 3. Search and get suggestions with active links/sources
+  // 3. Search YouTube directly with youtubei.js. This is free and keyless.
   app.post("/api/search", async (req, res) => {
     try {
       const { query } = req.body;
@@ -196,55 +196,19 @@ async function startServer() {
         return res.status(400).json({ error: "Search query is required." });
       }
 
-      if (!ai) {
-        return res.json([
-          { title: `${query} (Chill Mix)`, channel: "Lo-Fi Beats", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
-          { title: `${query} (Acoustic Cover)`, channel: "Acoustic Hub", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
-          { title: `${query} (Remastered HD)`, channel: "Retro Records", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }
-        ]);
-      }
+      const { Innertube } = await import("youtubei.js");
+      const youtube = await Innertube.create();
+      const search = await youtube.search(query.trim(), { type: "video" });
+      const results = search.videos.slice(0, 8).map((video: any) => ({
+        title: video.title?.toString?.() || video.title?.text || "Untitled video",
+        channel: video.author?.name || "Unknown channel",
+        url: `https://www.youtube.com/watch?v=${video.video_id || video.id}`
+      })).filter((video: { url: string }) => !video.url.endsWith("undefined"));
 
-      const systemInstruction = `You are a helper assisting a user to find real, high quality video resources for YouTube.
-      Generate a list of 5 real corresponding YouTube video recommendations matching the query.
-      Respond with a JSON array where each object has "title", "channel", and "url" (a real YouTube watch link like https://www.youtube.com/watch?v=...).`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents: `Recommendations for downloading audio clip for: ${query}`,
-        config: {
-          systemInstruction,
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING },
-                channel: { type: Type.STRING },
-                url: { type: Type.STRING, description: "Must be a valid YouTube watch URL" }
-              },
-              required: ["title", "channel", "url"]
-            }
-          }
-        }
-      });
-
-      const text = response.text;
-      if (text) {
-        const results = JSON.parse(text.trim());
-        return res.json(results);
-      }
-
-      res.json([]);
+      res.json(results);
     } catch (err) {
       console.error("Search error:", err);
-      if (isQuotaExceededError(err)) {
-        res.setHeader("X-Gemini-Quota-Exceeded", "true");
-      }
-      res.json([
-        { title: `${req.body.query || "Query"} (Studio Master)`, channel: "HQ Music", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }
-      ]);
+      res.status(500).json({ error: "YouTube search failed. Please paste a direct YouTube URL instead." });
     }
   });
 
@@ -290,66 +254,108 @@ async function startServer() {
   // yt-dlp binary path (bundled with youtube-dl-exec, executes via Node child_process)
   const YTDLP = path.join(process.cwd(), "node_modules", "youtube-dl-exec", "bin", "yt-dlp.exe");
 
-  // 4. Audio download via yt-dlp — streams audio directly to client
+  // 4. Audio download via yt-dlp and ffmpeg. Produces a real converted file.
   app.get("/api/generate-audio", async (req, res) => {
     const url = req.query.url as string;
-    const format = (req.query.format as string) || "webm";
+    const requestedFormat = String(req.query.format || "mp3").toLowerCase();
+    const format = isSupportedFormat(requestedFormat) ? requestedFormat : "mp3";
+    const bitrate = Math.round(clampNumber(req.query.bitrate, 320, 64, 320));
+    const sampleRate = Math.round(clampNumber(req.query.sampleRate, 48000, 8000, 96000));
+    const trimStart = clampNumber(req.query.trimStart, 0, 0, 24 * 60 * 60);
+    const trimEnd = clampNumber(req.query.trimEnd, 0, 0, 24 * 60 * 60);
+    const volumeBoost = clampNumber(req.query.volumeBoost, 1, 0.1, 2.5);
+    const fadeIn = clampNumber(req.query.fadeIn, 0, 0, 60);
+    const fadeOut = clampNumber(req.query.fadeOut, 0, 0, 60);
+    const equalizer = String(req.query.equalizer || "flat");
 
     if (!url) return res.status(400).send("YouTube URL is required.");
     if (!url.includes("youtube.com") && !url.includes("youtu.be")) {
       return res.status(400).send("Invalid YouTube URL.");
     }
 
+    const tmpRoot = path.join(process.cwd(), ".tmp-audio");
+    let jobDir = "";
+
     try {
       // Fetch title quickly for a nice filename (yt-dlp --print title)
-      let title = "audio";
+      let title = getSafeFilename(String(req.query.title || ""));
       try {
         const { stdout } = await execFileAsync(YTDLP, [
           "--print", "%(title)s",
           "--no-playlist",
           url
         ], { timeout: 20000 });
-        title = stdout.trim().replace(/[<>:"/\\|?*\r\n]/g, "").substring(0, 100) || "audio";
+        title = title || getSafeFilename(stdout.trim());
       } catch (_) {}
+      title = title || "audio";
 
-      const filename = `${title}.${format === "mp3" ? "webm" : format}`;
-      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
-      res.setHeader("Content-Type", "audio/webm");
+      await fsp.mkdir(tmpRoot, { recursive: true });
+      jobDir = await fsp.mkdtemp(path.join(tmpRoot, "job-"));
 
-      // Stream best audio directly from yt-dlp stdout to response
-      console.log(`Streaming audio for: ${title}`);
-      const ytdlpProc = spawn(YTDLP, [
-        "-f", "bestaudio",
+      const filters = [
+        volumeBoost !== 1 ? `volume=${volumeBoost.toFixed(2)}` : "",
+        EQ_FILTERS[equalizer] || "",
+        fadeIn > 0 ? `afade=t=in:st=0:d=${fadeIn.toFixed(2)}` : "",
+        fadeOut > 0 && trimEnd > trimStart
+          ? `afade=t=out:st=${Math.max(0, trimEnd - trimStart - fadeOut).toFixed(2)}:d=${fadeOut.toFixed(2)}`
+          : ""
+      ].filter(Boolean);
+
+      const postprocessorArgs = [
+        `-ar ${sampleRate}`,
+        filters.length > 0 ? `-af ${filters.join(",")}` : "",
+        trimStart > 0 ? `-ss ${trimStart.toFixed(2)}` : "",
+        trimEnd > trimStart ? `-to ${trimEnd.toFixed(2)}` : ""
+      ].filter(Boolean).join(" ");
+
+      const args = [
         "--no-playlist",
-        "-o", "-",       // output to stdout
-        "--quiet",       // suppress progress to stderr only
-        url
-      ]);
+        "--no-mtime",
+        "--restrict-filenames",
+        "-f", "bestaudio/best",
+        "-x",
+        "--audio-format", YTDLP_AUDIO_FORMATS[format],
+        "--audio-quality", `${bitrate}K`,
+        "-o", path.join(jobDir, "%(title).100B.%(ext)s")
+      ];
 
-      ytdlpProc.stdout.pipe(res);
+      if (postprocessorArgs) {
+        args.push("--postprocessor-args", postprocessorArgs);
+      }
 
-      ytdlpProc.stderr.on("data", (data: Buffer) => {
-        console.error("[yt-dlp]", data.toString().trim());
+      args.push(url);
+
+      console.log(`Converting audio for: ${title} -> ${format} ${bitrate}K`);
+      await execFileAsync(YTDLP, args, { timeout: 10 * 60 * 1000, maxBuffer: 1024 * 1024 * 10 });
+
+      const files = await fsp.readdir(jobDir);
+      const outputFile = files.find((file) => file.toLowerCase().endsWith(`.${format}`)) || files[0];
+      if (!outputFile) {
+        throw new Error("yt-dlp did not produce an audio file.");
+      }
+
+      const outputPath = path.join(jobDir, outputFile);
+      const actualExt = path.extname(outputFile).replace(".", "").toLowerCase() as SupportedFormat;
+      const contentType = AUDIO_CONTENT_TYPES[actualExt] || AUDIO_CONTENT_TYPES[format];
+      const filename = `${title}.${actualExt || format}`;
+
+      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+      res.setHeader("Content-Type", contentType);
+
+      const stream = fs.createReadStream(outputPath);
+      stream.pipe(res);
+      res.on("finish", () => {
+        fsp.rm(jobDir, { recursive: true, force: true }).catch(() => {});
       });
-
-      ytdlpProc.on("error", (err) => {
-        console.error("yt-dlp process error:", err);
-        if (!res.headersSent) res.status(500).send("yt-dlp error: " + err.message);
-      });
-
-      ytdlpProc.on("close", (code) => {
-        if (code !== 0 && !res.writableEnded) {
-          console.error("yt-dlp exited with code:", code);
-        }
-      });
-
-      // If client disconnects, kill yt-dlp
-      req.on("close", () => {
-        ytdlpProc.kill();
+      res.on("close", () => {
+        fsp.rm(jobDir, { recursive: true, force: true }).catch(() => {});
       });
 
     } catch (e: any) {
       console.error("Download error:", e);
+      if (jobDir) {
+        fsp.rm(jobDir, { recursive: true, force: true }).catch(() => {});
+      }
       if (!res.headersSent) res.status(500).send("Failed to download audio: " + e.message);
     }
   });
@@ -375,4 +381,3 @@ async function startServer() {
 }
 
 startServer();
-

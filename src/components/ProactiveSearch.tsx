@@ -5,7 +5,6 @@ import { Search, Sparkles, Youtube, ExternalLink, Music, Plus, FolderPlus, Arrow
 interface ProactiveSearchProps {
   onSelectResult: (videoUrl: string) => void;
   onAddToQueue?: (url: string, title: string, artist: string) => void;
-  onQuotaExceeded?: () => void;
   isLoading: boolean;
   setIsLoading: (val: boolean) => void;
 }
@@ -24,7 +23,7 @@ const PRESET_QUERIES = [
   "Ambient nature soundscape"
 ];
 
-export default function ProactiveSearch({ onSelectResult, onAddToQueue, onQuotaExceeded, isLoading, setIsLoading }: ProactiveSearchProps) {
+export default function ProactiveSearch({ onSelectResult, onAddToQueue, isLoading, setIsLoading }: ProactiveSearchProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -48,10 +47,6 @@ export default function ProactiveSearch({ onSelectResult, onAddToQueue, onQuotaE
         body: JSON.stringify({ query: activeQuery })
       });
 
-      if (response.headers.get("X-Gemini-Quota-Exceeded") === "true") {
-        if (onQuotaExceeded) onQuotaExceeded();
-      }
-
       if (!response.ok) {
         throw new Error("Failed to explore resources.");
       }
@@ -60,7 +55,7 @@ export default function ProactiveSearch({ onSelectResult, onAddToQueue, onQuotaE
       setResults(data);
     } catch (err: any) {
       console.error(err);
-      setError("Failed to retrieve recommendations from Gemini Search Grounding.");
+      setError("Failed to retrieve YouTube search results. Try a direct video URL instead.");
     } finally {
       setIsLoading(false);
     }
@@ -73,11 +68,11 @@ export default function ProactiveSearch({ onSelectResult, onAddToQueue, onQuotaE
         <div className="flex items-center gap-2">
           <Sparkles className="w-5 h-5 text-[#ff4e00] animate-pulse" />
           <h3 className="font-heading font-semibold tracking-tight text-white text-lg">
-            Smart YouTube AI Finder & Search Grounding
+            YouTube Finder
           </h3>
         </div>
         <p className="text-xs text-zinc-500 font-sans">
-          Don't have a URL handy? Use Gemini Google Search grounding to discover real videos, copy links, or load them instantly.
+          Don't have a URL handy? Search YouTube directly, copy links, or load them instantly.
         </p>
       </div>
 
@@ -126,7 +121,7 @@ export default function ProactiveSearch({ onSelectResult, onAddToQueue, onQuotaE
         <div className="flex flex-col gap-3 max-h-96 overflow-y-auto pr-1">
           <div className="flex justify-between items-center bg-white/0">
             <span className="text-[10px] uppercase font-bold text-zinc-500 font-mono tracking-wider">
-              Grounded Search Results from Gemini & Google
+              YouTube Search Results
             </span>
             <span className="text-[9px] bg-[#ff4e00]/10 text-[#ff8c00] font-bold font-mono px-2 py-0.5 rounded">
               {results.length} Tracks Found
