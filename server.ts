@@ -3,11 +3,9 @@ import fs from "fs";
 import { promises as fsp } from "fs";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { execFile } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
+import { Readable } from "stream";
 import ytpl from "ytpl";
-
-const execFileAsync = promisify(execFile);
 
 const SUPPORTED_FORMATS = ["mp3", "wav", "aac", "flac", "m4a", "ogg"] as const;
 type SupportedFormat = typeof SUPPORTED_FORMATS[number];
@@ -19,15 +17,6 @@ const AUDIO_CONTENT_TYPES: Record<SupportedFormat, string> = {
   flac: "audio/flac",
   m4a: "audio/mp4",
   ogg: "audio/ogg"
-};
-
-const YTDLP_AUDIO_FORMATS: Record<SupportedFormat, string> = {
-  mp3: "mp3",
-  wav: "wav",
-  aac: "aac",
-  flac: "flac",
-  m4a: "m4a",
-  ogg: "vorbis"
 };
 
 const EQ_FILTERS: Record<string, string> = {
@@ -94,6 +83,41 @@ function buildLocalTags(rawTitle: string, rawAuthor = "Unknown Artist") {
     genre,
     year: yearMatch?.[0] || new Date().getFullYear().toString()
   };
+}
+
+function getYouTubeVideoId(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.includes("youtu.be")) {
+      return parsed.pathname.split("/").filter(Boolean)[0] || null;
+    }
+    if (parsed.searchParams.has("v")) {
+      return parsed.searchParams.get("v");
+    }
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const markerIndex = parts.findIndex((part) => ["embed", "shorts", "live"].includes(part));
+    if (markerIndex >= 0) {
+      return parts[markerIndex + 1] || null;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function getFfmpegOutputArgs(format: SupportedFormat, bitrate: number): string[] {
+  switch (format) {
+    case "mp3":
+      return ["-codec:a", "libmp3lame", "-b:a", `${bitrate}k`, "-f", "mp3"];
+    case "wav":
+      return ["-codec:a", "pcm_s16le", "-f", "wav"];
+    case "aac":
+      return ["-codec:a", "aac", "-b:a", `${bitrate}k`, "-f", "adts"];
+    case "flac":
+      return ["-codec:a", "flac", "-f", "flac"];
+    case "m4a":
+      return ["-codec:a", "aac", "-b:a", `${bitrate}k`, "-f", "ipod"];
+    case "ogg":
+      return ["-codec:a", "libvorbis", "-b:a", `${bitrate}k`, "-f", "ogg"];
+  }
 }
 
 async function startServer() {
@@ -251,10 +275,7 @@ async function startServer() {
     }
   });
 
-  // yt-dlp binary path (bundled with youtube-dl-exec, executes via Node child_process)
-  const YTDLP = path.join(process.cwd(), "node_modules", "youtube-dl-exec", "bin", "yt-dlp.exe");
-
-  // 4. Audio download via yt-dlp and ffmpeg. Produces a real converted file.
+  // 4. Audio download via youtubei.js and ffmpeg. Produces a real converted file.
   app.get("/api/generate-audio", async (req, res) => {
     const url = req.query.url as string;
     const requestedFormat = String(req.query.format || "mp3").toLowerCase();
@@ -273,24 +294,24 @@ async function startServer() {
       return res.status(400).send("Invalid YouTube URL.");
     }
 
+    const videoId = getYouTubeVideoId(url);
+    if (!videoId) {
+      return res.status(400).send("Could not parse a YouTube video ID from the URL.");
+    }
+
     const tmpRoot = path.join(process.cwd(), ".tmp-audio");
     let jobDir = "";
 
     try {
-      // Fetch title quickly for a nice filename (yt-dlp --print title)
       let title = getSafeFilename(String(req.query.title || ""));
-      try {
-        const { stdout } = await execFileAsync(YTDLP, [
-          "--print", "%(title)s",
-          "--no-playlist",
-          url
-        ], { timeout: 20000 });
-        title = title || getSafeFilename(stdout.trim());
-      } catch (_) {}
-      title = title || "audio";
+      const { Innertube } = await import("youtubei.js");
+      const youtube = await Innertube.create();
+      const info = await youtube.getBasicInfo(videoId);
+      title = title || getSafeFilename(info.basic_info.title || "");
 
       await fsp.mkdir(tmpRoot, { recursive: true });
       jobDir = await fsp.mkdtemp(path.join(tmpRoot, "job-"));
+      const outputPath = path.join(jobDir, `${title || "audio"}.${format}`);
 
       const filters = [
         volumeBoost !== 1 ? `volume=${volumeBoost.toFixed(2)}` : "",
@@ -301,43 +322,44 @@ async function startServer() {
           : ""
       ].filter(Boolean);
 
-      const postprocessorArgs = [
-        `-ar ${sampleRate}`,
-        filters.length > 0 ? `-af ${filters.join(",")}` : "",
-        trimStart > 0 ? `-ss ${trimStart.toFixed(2)}` : "",
-        trimEnd > trimStart ? `-to ${trimEnd.toFixed(2)}` : ""
-      ].filter(Boolean).join(" ");
-
-      const args = [
-        "--no-playlist",
-        "--no-mtime",
-        "--restrict-filenames",
-        "-f", "bestaudio/best",
-        "-x",
-        "--audio-format", YTDLP_AUDIO_FORMATS[format],
-        "--audio-quality", `${bitrate}K`,
-        "-o", path.join(jobDir, "%(title).100B.%(ext)s")
+      console.log(`Converting audio for: ${title} -> ${format} ${bitrate}K`);
+      const webStream = await info.download({ type: "audio", quality: "best" });
+      const nodeStream = Readable.fromWeb(webStream as any);
+      const ffmpegArgs = [
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", "pipe:0",
+        "-vn",
+        ...(trimStart > 0 ? ["-ss", trimStart.toFixed(2)] : []),
+        ...(trimEnd > trimStart ? ["-t", (trimEnd - trimStart).toFixed(2)] : []),
+        "-ar", String(sampleRate),
+        ...(filters.length > 0 ? ["-af", filters.join(",")] : []),
+        ...getFfmpegOutputArgs(format, bitrate),
+        outputPath
       ];
 
-      if (postprocessorArgs) {
-        args.push("--postprocessor-args", postprocessorArgs);
-      }
+      await new Promise<void>((resolve, reject) => {
+        const ffmpeg = spawn("ffmpeg", ffmpegArgs, { stdio: ["pipe", "ignore", "pipe"] });
+        let stderr = "";
 
-      args.push(url);
+        ffmpeg.stderr.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+        ffmpeg.on("error", reject);
+        ffmpeg.on("close", (code) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(stderr.trim() || `ffmpeg exited with code ${code}`));
+          }
+        });
+        nodeStream.on("error", reject);
+        nodeStream.pipe(ffmpeg.stdin);
+      });
 
-      console.log(`Converting audio for: ${title} -> ${format} ${bitrate}K`);
-      await execFileAsync(YTDLP, args, { timeout: 10 * 60 * 1000, maxBuffer: 1024 * 1024 * 10 });
-
-      const files = await fsp.readdir(jobDir);
-      const outputFile = files.find((file) => file.toLowerCase().endsWith(`.${format}`)) || files[0];
-      if (!outputFile) {
-        throw new Error("yt-dlp did not produce an audio file.");
-      }
-
-      const outputPath = path.join(jobDir, outputFile);
-      const actualExt = path.extname(outputFile).replace(".", "").toLowerCase() as SupportedFormat;
-      const contentType = AUDIO_CONTENT_TYPES[actualExt] || AUDIO_CONTENT_TYPES[format];
-      const filename = `${title}.${actualExt || format}`;
+      const contentType = AUDIO_CONTENT_TYPES[format];
+      const filename = `${title || "audio"}.${format}`;
 
       res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
       res.setHeader("Content-Type", contentType);
