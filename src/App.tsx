@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { 
   Youtube, Sparkles, Music, Sliders, Play, Pause, AlertTriangle, 
   ArrowRight, Compass, ExternalLink, Download, Clock, Library, ListTodo, User,
-  Trash2, Plus, RefreshCw, Bot, CheckCircle2, FolderPlus, DownloadCloud, PlayCircle
+  Trash2, Plus, RefreshCw, Bot, CheckCircle2, FolderPlus, DownloadCloud, PlayCircle, History, X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -73,6 +73,13 @@ export default function App() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioPreviewElement, setAudioPreviewElement] = useState<HTMLAudioElement | null>(null);
+
+  // Download history
+  const [downloadHistory, setDownloadHistory] = useState<Array<{
+    id: string; title: string; artist: string; url: string;
+    format: string; bitrate: number; timestamp: Date;
+  }>>([]);
+  const [showHistory, setShowHistory] = useState(false);
 
   // Auto clean audio on component unmount
   useEffect(() => {
@@ -214,6 +221,9 @@ export default function App() {
     setLogs(prev => [...prev, `QUEUE: Directly appended search result "${title}" to sequence batch transcoder.`]);
   };
 
+  // Fetched playlist preview tracks (shown before adding to queue)
+  const [fetchedPlaylistTracks, setFetchedPlaylistTracks] = useState<Array<{title: string; channel: string; url: string}>>([]);
+
   // 2. Scan and load playlist via backend grounding API
   const handleLoadPlaylist = async () => {
     if (!playlistUrl || !playlistUrl.trim()) {
@@ -253,6 +263,7 @@ export default function App() {
         thumbnailUrl: "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=120&auto=format&fit=crop"
       }));
 
+      setFetchedPlaylistTracks(tracks);
       setQueue(prev => [...prev, ...newItems]);
       setLogs(prev => [
         ...prev, 
@@ -415,7 +426,7 @@ export default function App() {
           
           // Trigger actual download
           try {
-            const endpoint = `/api/generate-audio?format=${activeItem.format}&bitrate=${activeItem.bitrate}`;
+            const endpoint = `/api/generate-audio?url=${encodeURIComponent(activeItem.url)}&format=${activeItem.format}&bitrate=${activeItem.bitrate}`;
             const audioRes = await fetch(endpoint);
             if (audioRes.ok) {
               const blob = await audioRes.blob();
@@ -429,6 +440,15 @@ export default function App() {
               document.body.removeChild(downloadLink);
 
               setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, status: 'completed' } : item));
+              setDownloadHistory(prev => [{
+                id: Date.now().toString(),
+                title: finalTitle || "Unknown",
+                artist: finalArtist || "Unknown",
+                url: activeItem.url,
+                format: activeItem.format,
+                bitrate: activeItem.bitrate,
+                timestamp: new Date()
+              }, ...prev.slice(0, 49)]);
               setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] COMPLETED: Transcode & download finalized for song: "${finalTitle}".`]);
             } else {
               throw new Error("Transcode endpoint returned error.");
@@ -486,7 +506,7 @@ export default function App() {
         clearInterval(interval);
         
         // Formulate backend request to download active custom synth stream
-        const endpoint = `/api/generate-audio?format=${settings.format}&bitrate=${settings.bitrate}&sampleRate=${settings.sampleRate}`;
+        const endpoint = `/api/generate-audio?url=${encodeURIComponent(videoMetadata?.url || youtubeUrl)}&format=${settings.format}&bitrate=${settings.bitrate}&sampleRate=${settings.sampleRate}`;
         
         try {
           // Prefetch the audio to create a local Blob for on-screen playback preview
@@ -495,6 +515,16 @@ export default function App() {
             const blob = await audioResponse.blob();
             const localUrl = URL.createObjectURL(blob);
             setAudioUrl(localUrl);
+            // Save to download history
+            setDownloadHistory(prev => [{
+              id: Date.now().toString(),
+              title: tags.title || videoMetadata?.title || "Unknown",
+              artist: tags.artist || videoMetadata?.author || "Unknown",
+              url: videoMetadata?.url || youtubeUrl,
+              format: settings.format,
+              bitrate: settings.bitrate,
+              timestamp: new Date()
+            }, ...prev.slice(0, 49)]);
 
             // Programmatically download the file instantly!
             const downloadLink = document.createElement("a");
@@ -560,6 +590,22 @@ export default function App() {
 
   return (
     <div id="app_root" className="min-h-screen bg-[#080808] text-[#f0f0f0] flex flex-col antialiased selection:bg-[#ff4e00] selection:text-white relative overflow-hidden">
+      {/* Animated background orbs */}
+      <motion.div
+        animate={{ x: [0, 40, -20, 0], y: [0, -30, 20, 0] }}
+        transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
+        className="pointer-events-none fixed top-[-10%] left-[-5%] w-[500px] h-[500px] rounded-full bg-[#ff4e00]/5 blur-[120px] z-0"
+      />
+      <motion.div
+        animate={{ x: [0, -50, 30, 0], y: [0, 40, -20, 0] }}
+        transition={{ duration: 22, repeat: Infinity, ease: "easeInOut", delay: 3 }}
+        className="pointer-events-none fixed bottom-[-10%] right-[-5%] w-[600px] h-[600px] rounded-full bg-[#ff8c00]/4 blur-[140px] z-0"
+      />
+      <motion.div
+        animate={{ x: [0, 30, -10, 0], y: [0, -20, 40, 0] }}
+        transition={{ duration: 26, repeat: Infinity, ease: "easeInOut", delay: 6 }}
+        className="pointer-events-none fixed top-[40%] left-[50%] w-[400px] h-[400px] rounded-full bg-[#00ff9d]/3 blur-[160px] z-0"
+      />
       
       {/* Fullscreen Interactive AI-Grounding Single Video Load Screen */}
       <AnimatePresence>
@@ -700,7 +746,11 @@ export default function App() {
       <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-[#ff4e00]/15 opacity-[0.05] blur-[150px] rounded-full pointer-events-none"></div>
 
       {/* Premium Header / Swiss-Clean Navigation */}
-      <header className="bg-[#080808]/85 border-b border-white/5 sticky top-0 z-50 py-5 px-6 md:px-12 backdrop-blur-md">
+      <motion.header
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4 }}
+        className="bg-[#080808]/85 border-b border-white/5 sticky top-0 z-50 py-5 px-6 md:px-12 backdrop-blur-md">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-3 select-none">
             <div className="w-10 h-10 bg-gradient-to-br from-[#ff4e00] to-[#802700] rounded-lg flex items-center justify-center shadow-[0_0_20px_rgba(255,78,0,0.4)]">
@@ -724,9 +774,21 @@ export default function App() {
             <span className="px-2.5 py-1 bg-[#ff4e00]/10 rounded-lg text-[10.5px] text-[#ff8c00] font-bold border border-[#ff4e00]/20">
               BITRATE: 320KBPS HD
             </span>
+            <button
+              onClick={() => setShowHistory(true)}
+              className="relative flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10.5px] font-bold text-zinc-300 hover:text-white transition-all cursor-pointer"
+            >
+              <History className="w-3.5 h-3.5" />
+              History
+              {downloadHistory.length > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-[#ff4e00] text-white text-[9px] font-black rounded-full flex items-center justify-center">
+                  {downloadHistory.length > 9 ? "9+" : downloadHistory.length}
+                </span>
+              )}
+            </button>
           </div>
         </div>
-      </header>
+      </motion.header>
 
       {/* Gemini Rate-Limit or Quota Warn Banner */}
       {isQuotaExceeded && (
@@ -758,7 +820,11 @@ export default function App() {
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-8 md:px-12 grid grid-cols-1 lg:grid-cols-12 gap-8 relative z-10">
         
         {/* Left Column: Direct Converter Operations */}
-        <div className="lg:col-span-7 flex flex-col gap-8">
+        <motion.div
+          initial={{ opacity: 0, x: -30 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ duration: 0.5, ease: "easeOut" }}
+          className="lg:col-span-7 flex flex-col gap-8">
           
           {/* URL Entry Section */}
           <div className="bg-[#121212] rounded-2xl border border-white/5 p-6 shadow-2xl flex flex-col gap-5 relative group">
@@ -826,7 +892,7 @@ export default function App() {
                       type="button"
                       onClick={() => handleLoadMetadata()}
                       disabled={isFetchingMetadata || !youtubeUrl.trim()}
-                      className="px-6 py-3 bg-white text-black font-extrabold text-sm rounded-xl transition-all shadow-md shrink-0 cursor-pointer disabled:opacity-50 hover:bg-[#ff4e00] hover:text-white flex items-center justify-center gap-2 transform active:scale-95 uppercase tracking-tight"
+                      className="px-6 py-3 bg-white text-black font-extrabold text-sm rounded-xl transition-all shadow-md shrink-0 cursor-pointer disabled:opacity-50 hover:bg-[#ff4e00] hover:text-white hover:shadow-[0_0_20px_rgba(255,78,0,0.4)] flex items-center justify-center gap-2 transform active:scale-95 uppercase tracking-tight"
                     >
                       {isFetchingMetadata ? (
                         <>
@@ -914,7 +980,7 @@ export default function App() {
                       type="button"
                       onClick={() => handleLoadPlaylist()}
                       disabled={isFetchingPlaylist || !playlistUrl.trim()}
-                      className="px-6 py-3 bg-white text-black font-extrabold text-sm rounded-xl transition-all shadow-md shrink-0 cursor-pointer disabled:opacity-50 hover:bg-[#ff4e00] hover:text-white flex items-center justify-center gap-2 transform active:scale-95 uppercase tracking-tight"
+                      className="px-6 py-3 bg-white text-black font-extrabold text-sm rounded-xl transition-all shadow-md shrink-0 cursor-pointer disabled:opacity-50 hover:bg-[#ff4e00] hover:text-white hover:shadow-[0_0_20px_rgba(255,78,0,0.4)] flex items-center justify-center gap-2 transform active:scale-95 uppercase tracking-tight"
                     >
                       {isFetchingPlaylist ? (
                         <>
@@ -1013,6 +1079,38 @@ export default function App() {
                 </motion.div>
               )}
             </AnimatePresence>
+
+            {/* Fetched Playlist Tracks Preview */}
+            {fetchedPlaylistTracks.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-[#0a0a0a] border border-white/5 rounded-xl overflow-hidden"
+              >
+                <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 bg-white/5">
+                  <span className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-[#00ff9d]" />
+                    {fetchedPlaylistTracks.length} tracks added to queue
+                  </span>
+                  <button onClick={() => setFetchedPlaylistTracks([])}
+                    className="text-[10px] text-zinc-600 hover:text-zinc-300 cursor-pointer transition-colors">
+                    Dismiss
+                  </button>
+                </div>
+                <div className="divide-y divide-white/5 max-h-48 overflow-y-auto">
+                  {fetchedPlaylistTracks.map((track, i) => (
+                    <div key={i} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/5 transition-colors">
+                      <span className="text-[10px] font-mono text-zinc-600 w-5 shrink-0">{i + 1}</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-semibold text-zinc-200 truncate">{track.title}</p>
+                        <p className="text-[10px] text-zinc-500 truncate">{track.channel}</p>
+                      </div>
+                      <Music className="w-3 h-3 text-zinc-700 shrink-0" />
+                    </div>
+                  ))}
+                </div>
+              </motion.div>
+            )}
 
             {errorMsg && (
               <div className="flex items-start gap-2 bg-red-950/20 border border-red-900/40 p-3.5 rounded-xl text-xs font-semibold text-red-400 font-sans">
@@ -1302,7 +1400,7 @@ export default function App() {
             </div>
           )}
 
-        </div>
+        </motion.div>
 
         {/* Right Column: AI Grounded Discovery & Transcoding progress */}
         <div className="lg:col-span-5 flex flex-col gap-8">
@@ -1374,25 +1472,25 @@ export default function App() {
                     FILE CONVERTED & DISPATCHED
                   </div>
 
-                  {/* Audio Preview Widget */}
+                  {/* Audio Preview Player */}
                   {audioUrl && (
-                    <div className="flex items-center justify-between p-3 bg-zinc-950 border border-white/5 rounded-xl">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <button
-                          type="button"
-                          onClick={togglePlayPreview}
-                          className="w-9 h-9 bg-[#ff4e00] hover:bg-[#ff5f18] text-white rounded-lg flex items-center justify-center cursor-pointer transition-colors shrink-0"
-                        >
-                          {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 fill-white ml-0.5" />}
-                        </button>
+                    <div className="flex flex-col gap-2 p-3 bg-zinc-950 border border-white/10 rounded-xl">
+                      <div className="flex items-center justify-between">
                         <div className="flex flex-col min-w-0">
                           <span className="text-xs font-bold text-white truncate">{tags.title || "Track Preview"}</span>
-                          <span className="text-[10px] font-mono text-zinc-500">Codec: {settings.format.toUpperCase()} HD ({settings.bitrate}kbps)</span>
+                          <span className="text-[10px] font-mono text-zinc-500">{tags.artist || "Unknown Artist"} · {settings.format.toUpperCase()} {settings.bitrate}kbps</span>
                         </div>
+                        <span className="text-[10px] bg-[#ff4e00]/10 text-[#ff8c00] font-bold font-mono px-2 py-0.5 rounded shrink-0 ml-2">HIFI</span>
                       </div>
-                      <span className="text-[10px] bg-[#ff4e00]/10 text-[#ff8c00] font-bold font-mono px-2 py-0.5 rounded shrink-0">
-                        HIFI READY
-                      </span>
+                      <audio
+                        src={audioUrl}
+                        controls
+                        className="w-full h-8"
+                        style={{ accentColor: "#ff4e00", colorScheme: "dark" }}
+                        onPlay={() => setIsPlaying(true)}
+                        onPause={() => setIsPlaying(false)}
+                        onEnded={() => setIsPlaying(false)}
+                      />
                     </div>
                   )}
 
@@ -1463,6 +1561,82 @@ export default function App() {
         </div>
       </footer>
 
+      {/* ── Download History Panel ── */}
+      {showHistory && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[200] flex items-start justify-end p-4 sm:p-8">
+          <div className="bg-[#111] border border-white/10 rounded-2xl w-full max-w-md max-h-[85vh] flex flex-col shadow-2xl">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-white/5">
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4 text-[#ff4e00]" />
+                <h3 className="text-sm font-bold text-white">Download History</h3>
+                <span className="text-[10px] bg-white/10 text-zinc-400 px-1.5 py-0.5 rounded font-mono">{downloadHistory.length}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                {downloadHistory.length > 0 && (
+                  <button onClick={() => { if(window.confirm("Clear all history?")) setDownloadHistory([]); }}
+                    className="text-[10px] text-zinc-500 hover:text-red-400 transition-colors cursor-pointer font-mono">
+                    Clear All
+                  </button>
+                )}
+                <button onClick={() => setShowHistory(false)}
+                  className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 transition-colors cursor-pointer">
+                  <X className="w-4 h-4 text-zinc-400" />
+                </button>
+              </div>
+            </div>
+            {/* List */}
+            <div className="flex-1 overflow-y-auto divide-y divide-white/5">
+              {downloadHistory.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-zinc-600 gap-3">
+                  <Download className="w-8 h-8 opacity-30" />
+                  <p className="text-sm font-mono">No downloads yet</p>
+                </div>
+              ) : (
+                downloadHistory.map((item) => (
+                  <div key={item.id} className="flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors group">
+                    <div className="w-8 h-8 bg-[#ff4e00]/10 rounded-lg flex items-center justify-center shrink-0">
+                      <Music className="w-4 h-4 text-[#ff4e00]" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-bold text-white truncate">{item.title}</p>
+                      <p className="text-[10px] text-zinc-500 truncate">{item.artist}</p>
+                      <p className="text-[10px] font-mono text-zinc-600 mt-0.5">
+                        {item.format.toUpperCase()} · {item.bitrate}kbps · {item.timestamp.toLocaleTimeString([], {hour: "2-digit", minute:"2-digit"})}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const ep = `/api/generate-audio?url=${encodeURIComponent(item.url)}&format=${item.format}&bitrate=${item.bitrate}`;
+                        const a = document.createElement("a");
+                        a.href = ep;
+                        a.download = `${item.title.replace(/\s+/g,"_")}.${item.format}`;
+                        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] bg-[#ff4e00]/10 hover:bg-[#ff4e00]/20 text-[#ff8c00] border border-[#ff4e00]/20 px-2 py-1.5 rounded-lg font-bold cursor-pointer shrink-0"
+                    >
+                      <Download className="w-3 h-3" />
+                      Re-DL
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
