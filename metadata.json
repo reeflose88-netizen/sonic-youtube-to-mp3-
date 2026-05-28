@@ -1,6 +1,6 @@
 {
-  "name": "YouTube to MP3 Converter",
-  "description": "An elegant, lightning-fast YouTube to MP3/WAV audio converter and ID3 metadata optimizer powered by Gemini AI and DSP algorithms.",
+  "name": "SonicMP3",
+  "description": "A local YouTube audio converter with playlist batching, direct search, DSP presets, trimming, previews, and ID3 metadata cleanup.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

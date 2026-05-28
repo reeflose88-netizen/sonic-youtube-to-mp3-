@@ -1,6 +1,15 @@
 import { AudioSettings } from "../types";
 import { Sliders, Volume2, Scissors, Music, Headphones, Flame } from "lucide-react";
 
+const EQ_PRESETS: Array<{ id: AudioSettings["equalizer"]; label: string }> = [
+  { id: "flat", label: "Flat" },
+  { id: "bass", label: "Bass Booster" },
+  { id: "vocal", label: "Vocal Center" },
+  { id: "treble", label: "Pure Treble" },
+  { id: "instrumental", label: "Acoustic Stage" },
+  { id: "lofi", label: "Lo-Fi Vintage" },
+];
+
 interface AudioSettingsPanelProps {
   settings: AudioSettings;
   durationSeconds: number;
@@ -124,18 +133,11 @@ export default function AudioSettingsPanel({ settings, durationSeconds = 220, on
             <Sliders className="w-3.5 h-3.5 text-zinc-400" /> EQ Profile Preset
           </label>
           <div className="grid grid-cols-3 gap-1.5">
-            {[
-              { id: "flat", label: "Flat" },
-              { id: "bass", label: "Bass Booster" },
-              { id: "vocal", label: "Vocal Center" },
-              { id: "treble", label: "Pure Treble" },
-              { id: "instrumental", label: "Acoustic Stage" },
-              { id: "lofi", label: "Lo-Fi Vintage" },
-            ].map((eq) => (
+            {EQ_PRESETS.map((eq) => (
               <button
                 key={eq.id}
                 type="button"
-                onClick={() => updateSetting("equalizer", eq.id as any)}
+                onClick={() => updateSetting("equalizer", eq.id)}
                 className={`py-2 px-3 border rounded-xl text-left text-xs font-medium cursor-pointer transition-all duration-150 ${
                   settings.equalizer === eq.id
                     ? "border-[#ff4e00] bg-[#ff4e00]/10 text-[#ff8c00] font-semibold"

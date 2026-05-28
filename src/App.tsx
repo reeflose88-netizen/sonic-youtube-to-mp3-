@@ -13,6 +13,20 @@ import ID3TagEditor from "./components/ID3TagEditor";
 import ProactiveSearch from "./components/ProactiveSearch";
 import ConsoleOutput from "./components/ConsoleOutput";
 
+const AUDIO_FORMATS = ["mp3", "wav", "aac", "flac", "m4a", "ogg"] as const;
+const AUDIO_BITRATES = [128, 192, 256, 320] as const;
+type AudioFormat = typeof AUDIO_FORMATS[number];
+type AudioBitrate = typeof AUDIO_BITRATES[number];
+
+function toAudioFormat(value: string): AudioFormat {
+  return AUDIO_FORMATS.includes(value as AudioFormat) ? value as AudioFormat : "mp3";
+}
+
+function toAudioBitrate(value: string | number): AudioBitrate {
+  const parsed = Number(value);
+  return AUDIO_BITRATES.includes(parsed as AudioBitrate) ? parsed as AudioBitrate : 320;
+}
+
 const defaultSettings: AudioSettings = {
   format: "mp3",
   bitrate: 320,
@@ -46,7 +60,11 @@ function buildAudioEndpoint(url: string, format: string, bitrate: number, settin
     fadeIn: String(settings.fadeIn),
     fadeOut: String(settings.fadeOut),
     equalizer: settings.equalizer,
-    title: tags?.title || "Audio"
+    title: tags?.title || "Audio",
+    artist: tags?.artist || "",
+    album: tags?.album || "",
+    genre: tags?.genre || "",
+    year: tags?.year || ""
   });
 
   return `/api/generate-audio?${params.toString()}`;
@@ -68,8 +86,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'single' | 'playlist'>('single');
   const [playlistUrl, setPlaylistUrl] = useState("");
   const [playlistLimit, setPlaylistLimit] = useState<number>(8);
-  const [playlistFormat, setPlaylistFormat] = useState<string>("mp3");
-  const [playlistBitrate, setPlaylistBitrate] = useState<number>(320);
+  const [playlistFormat, setPlaylistFormat] = useState<AudioFormat>("mp3");
+  const [playlistBitrate, setPlaylistBitrate] = useState<AudioBitrate>(320);
   const [isFetchingPlaylist, setIsFetchingPlaylist] = useState(false);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [activeQueueIndex, setActiveQueueIndex] = useState(-1);
@@ -1013,7 +1031,7 @@ export default function App() {
                         <span className="text-[10px] text-zinc-500 font-mono uppercase font-semibold">Codec</span>
                         <select
                           value={playlistFormat}
-                          onChange={(e) => setPlaylistFormat(e.target.value)}
+                          onChange={(e) => setPlaylistFormat(toAudioFormat(e.target.value))}
                           className="bg-zinc-950 border border-white/10 text-zinc-300 rounded-lg px-2 py-1.5 text-[10.5px] font-mono focus:outline-hidden cursor-pointer focus:border-[#ff4e00] uppercase"
                         >
                           <option value="mp3">mp3</option>
@@ -1028,7 +1046,7 @@ export default function App() {
                         <span className="text-[10px] text-zinc-500 font-mono uppercase font-semibold">Quality</span>
                         <select
                           value={playlistBitrate}
-                          onChange={(e) => setPlaylistBitrate(Number(e.target.value))}
+                          onChange={(e) => setPlaylistBitrate(toAudioBitrate(e.target.value))}
                           className="bg-zinc-950 border border-white/10 text-zinc-300 rounded-lg px-2 py-1.5 text-[10.5px] font-sans focus:outline-hidden cursor-pointer focus:border-[#ff4e00]"
                         >
                           <option value={128}>128kbps</option>
@@ -1159,7 +1177,7 @@ export default function App() {
                     <select
                       disabled={isProcessingQueue}
                       onChange={(e) => {
-                        const targetFormat = e.target.value as any;
+                        const targetFormat = toAudioFormat(e.target.value);
                         setQueue(prev => prev.map(item => item.status === 'pending' ? { ...item, format: targetFormat } : item));
                         setLogs(prev => [...prev, `QUEUE_OPTIONS: Configured format for all queued tracks to ${targetFormat.toUpperCase()}`]);
                       }}
@@ -1179,7 +1197,7 @@ export default function App() {
                     <select
                       disabled={isProcessingQueue}
                       onChange={(e) => {
-                        const targetBitrate = Number(e.target.value) as any;
+                        const targetBitrate = toAudioBitrate(e.target.value);
                         setQueue(prev => prev.map(item => item.status === 'pending' ? { ...item, bitrate: targetBitrate } : item));
                         setLogs(prev => [...prev, `QUEUE_OPTIONS: Configured quality for all queued tracks to ${targetBitrate}kbps`]);
                       }}
@@ -1254,7 +1272,7 @@ export default function App() {
                           <select
                             value={item.bitrate}
                             disabled={isProcessingQueue}
-                            onChange={(e) => handleUpdateQueueItemSettings(item.id, { bitrate: Number(e.target.value) as any })}
+                            onChange={(e) => handleUpdateQueueItemSettings(item.id, { bitrate: toAudioBitrate(e.target.value) })}
                             className="bg-[#0c0c0c] border border-white/10 text-zinc-400 rounded-lg px-2 py-1 text-[10px] font-sans focus:outline-hidden cursor-pointer focus:border-[#ff4e00]"
                           >
                             <option value={128}>128kbps</option>
@@ -1267,7 +1285,7 @@ export default function App() {
                           <select
                             value={item.format}
                             disabled={isProcessingQueue}
-                            onChange={(e) => handleUpdateQueueItemSettings(item.id, { format: e.target.value as any })}
+                            onChange={(e) => handleUpdateQueueItemSettings(item.id, { format: toAudioFormat(e.target.value) })}
                             className="bg-[#0c0c0c] border border-white/10 text-zinc-400 rounded-lg px-2 py-1 text-[10px] font-sans uppercase focus:outline-hidden cursor-pointer focus:border-[#ff4e00]"
                           >
                             <option value="mp3">mp3</option>

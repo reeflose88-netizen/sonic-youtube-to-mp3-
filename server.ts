@@ -3,9 +3,9 @@ import fs from "fs";
 import { promises as fsp } from "fs";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { spawn } from "child_process";
-import { Readable } from "stream";
-import ytpl from "ytpl";
+import { execFile } from "child_process";
+import { promisify } from "util";
+const execFileAsync = promisify(execFile);
 
 const SUPPORTED_FORMATS = ["mp3", "wav", "aac", "flac", "m4a", "ogg"] as const;
 type SupportedFormat = typeof SUPPORTED_FORMATS[number];
@@ -17,6 +17,15 @@ const AUDIO_CONTENT_TYPES: Record<SupportedFormat, string> = {
   flac: "audio/flac",
   m4a: "audio/mp4",
   ogg: "audio/ogg"
+};
+
+const YTDLP_AUDIO_FORMATS: Record<SupportedFormat, string> = {
+  mp3: "mp3",
+  wav: "wav",
+  aac: "aac",
+  flac: "flac",
+  m4a: "m4a",
+  ogg: "vorbis"
 };
 
 const EQ_FILTERS: Record<string, string> = {
@@ -43,6 +52,10 @@ function getSafeFilename(name: string, fallback = "audio"): string {
     .replace(/\s+/g, " ")
     .trim()
     .substring(0, 100) || fallback;
+}
+
+function quotePostprocessorValue(value: unknown): string {
+  return `"${String(value).replace(/["\\]/g, "\\$&")}"`;
 }
 
 function buildLocalTags(rawTitle: string, rawAuthor = "Unknown Artist") {
@@ -103,20 +116,67 @@ function getYouTubeVideoId(url: string): string | null {
   return null;
 }
 
-function getFfmpegOutputArgs(format: SupportedFormat, bitrate: number): string[] {
-  switch (format) {
-    case "mp3":
-      return ["-codec:a", "libmp3lame", "-b:a", `${bitrate}k`, "-f", "mp3"];
-    case "wav":
-      return ["-codec:a", "pcm_s16le", "-f", "wav"];
-    case "aac":
-      return ["-codec:a", "aac", "-b:a", `${bitrate}k`, "-f", "adts"];
-    case "flac":
-      return ["-codec:a", "flac", "-f", "flac"];
-    case "m4a":
-      return ["-codec:a", "aac", "-b:a", `${bitrate}k`, "-f", "ipod"];
-    case "ogg":
-      return ["-codec:a", "libvorbis", "-b:a", `${bitrate}k`, "-f", "ogg"];
+function getYouTubePlaylistId(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const listId = parsed.searchParams.get("list");
+    if (listId) return listId;
+
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const playlistIndex = parts.findIndex((part) => part.toLowerCase() === "playlist");
+    return playlistIndex >= 0 ? parts[playlistIndex + 1] || null : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function runCommand(command: string, args: string[], options: { timeout: number; cwd: string }) {
+  const localPythonPackages = path.join(options.cwd, ".python-packages");
+  const localTempDir = path.join(options.cwd, ".tmp-pyi");
+  await fsp.mkdir(localTempDir, { recursive: true });
+
+  return execFileAsync(command, args, {
+    timeout: options.timeout,
+    cwd: options.cwd,
+    maxBuffer: 1024 * 1024 * 10,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      PYTHONPATH: process.env.PYTHONPATH
+        ? `${localPythonPackages}${path.delimiter}${process.env.PYTHONPATH}`
+        : localPythonPackages,
+      TMP: localTempDir,
+      TEMP: localTempDir,
+      TMPDIR: localTempDir
+    }
+  });
+}
+
+function getBundledYtDlpPath(cwd: string): string {
+  const executableName = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+  const bundledPath = path.join(cwd, "node_modules", "youtube-dl-exec", "bin", executableName);
+  const fallbackPath = path.join(cwd, executableName);
+
+  if (fs.existsSync(bundledPath)) return bundledPath;
+  if (fs.existsSync(fallbackPath)) return fallbackPath;
+  return executableName;
+}
+
+async function getFfmpegLocationArgs(): Promise<string[]> {
+  if (process.env.FFMPEG_PATH) {
+    return ["--ffmpeg-location", process.env.FFMPEG_PATH];
+  }
+
+  const finderCommand = process.platform === "win32" ? "where.exe" : "which";
+  try {
+    const { stdout } = await execFileAsync(finderCommand, ["ffmpeg"], {
+      timeout: 5000,
+      windowsHide: true
+    });
+    const executablePath = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+    return executablePath ? ["--ffmpeg-location", path.dirname(executablePath)] : [];
+  } catch (_) {
+    return [];
   }
 }
 
@@ -236,46 +296,84 @@ async function startServer() {
     }
   });
 
-  // 3.5. Fetch real playlist tracks directly from YouTube using ytpl
+  // Path to bundled yt-dlp binary, with a local/root fallback for portable builds.
+  const YTDLP_BIN = getBundledYtDlpPath(process.cwd());
+
+  // 3.5. Fetch real playlist tracks via yt-dlp (ytpl is broken by YouTube changes)
   app.post("/api/playlist", async (req, res) => {
     let limit = 8;
     try {
       const { url } = req.body;
-      if (req.body.limit) {
-        limit = Number(req.body.limit);
-      }
+      if (req.body.limit) limit = Math.max(1, Math.min(50, Number(req.body.limit) || 8));
+
       if (!url || url.trim() === "") {
         return res.status(400).json({ error: "Playlist URL is required." });
       }
-
-      // Validate it looks like a YouTube playlist URL
       if (!url.includes("youtube.com") && !url.includes("youtu.be")) {
         return res.status(400).json({ error: "Invalid YouTube playlist URL." });
       }
 
-      console.log(`Fetching playlist: ${url} (limit: ${limit})`);
+      const playlistId = getYouTubePlaylistId(url);
+      if (!playlistId) {
+        return res.status(400).json({ error: "Could not parse a YouTube playlist ID from the URL." });
+      }
 
-      // Use ytpl to fetch the real playlist data from YouTube
-      const playlist = await ytpl(url, { limit });
+      console.log(`Fetching playlist via youtubei.js: ${playlistId} (limit: ${limit})`);
 
-      const tracks = playlist.items.map((item: any) => ({
-        title: item.title,
-        channel: item.author?.name || playlist.author?.name || "Unknown",
-        url: item.shortUrl || `https://www.youtube.com/watch?v=${item.id}`
-      }));
+      let tracks: Array<{ title: string; channel: string; url: string }> = [];
+      try {
+        const { Innertube } = await import("youtubei.js");
+        const youtube = await Innertube.create();
+        const playlist = await youtube.getPlaylist(playlistId);
+        tracks = (playlist.videos || []).slice(0, limit).map((video: any) => {
+          const videoId = video.video_id || video.id;
+          return {
+            title: video.title?.toString?.() || video.title?.text || "Unknown Track",
+            channel: video.author?.name || "Unknown Channel",
+            url: videoId ? `https://www.youtube.com/watch?v=${videoId}` : ""
+          };
+        }).filter((track: { url: string }) => track.url);
+      } catch (youtubeiError) {
+        console.warn("youtubei playlist fetch failed, falling back to yt-dlp:", youtubeiError);
 
-      console.log(`Found ${tracks.length} tracks in playlist: "${playlist.title}"`);
+        const { stdout } = await runCommand(YTDLP_BIN, [
+          "--flat-playlist",
+          "--print", "%(title)s|||%(channel)s|||%(webpage_url)s",
+          "--no-warnings",
+          "--playlist-items", `1-${limit}`,
+          url
+        ], {
+          cwd: process.cwd(),
+          timeout: 60000
+        });
+
+        tracks = stdout
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line: string) => {
+            const parts = line.split("|||");
+            return {
+              title: (parts[0] || "Unknown Track").trim(),
+              channel: (parts[1] || "Unknown Channel").trim(),
+              url: (parts[2] || "").trim()
+            };
+          })
+          .filter((track: { url: string }) => track.url.includes("youtube.com") || track.url.includes("youtu.be"));
+      }
+
+      console.log(`Found ${tracks.length} tracks`);
       res.json(tracks);
 
     } catch (err: any) {
       console.error("Playlist fetch error:", err);
-      res.status(500).json({ 
-        error: `Failed to fetch playlist: ${err.message || "Unknown error"}. Make sure the playlist is public.`
+      res.status(500).json({
+        error: `Failed to fetch playlist: ${err.message || "Unknown error"}. Make sure the playlist is public and the URL is correct.`
       });
     }
   });
 
-  // 4. Audio download via youtubei.js and ffmpeg. Produces a real converted file.
+  // 4. Audio download via yt-dlp and ffmpeg. Produces a real converted file.
   app.get("/api/generate-audio", async (req, res) => {
     const url = req.query.url as string;
     const requestedFormat = String(req.query.format || "mp3").toLowerCase();
@@ -311,8 +409,6 @@ async function startServer() {
 
       await fsp.mkdir(tmpRoot, { recursive: true });
       jobDir = await fsp.mkdtemp(path.join(tmpRoot, "job-"));
-      const outputPath = path.join(jobDir, `${title || "audio"}.${format}`);
-
       const filters = [
         volumeBoost !== 1 ? `volume=${volumeBoost.toFixed(2)}` : "",
         EQ_FILTERS[equalizer] || "",
@@ -322,49 +418,56 @@ async function startServer() {
           : ""
       ].filter(Boolean);
 
-      console.log(`Converting audio for: ${title} -> ${format} ${bitrate}K`);
-      const webStream = await info.download({ type: "audio", quality: "best" });
-      const nodeStream = Readable.fromWeb(webStream as any);
-      const ffmpegArgs = [
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", "pipe:0",
-        "-vn",
-        ...(trimStart > 0 ? ["-ss", trimStart.toFixed(2)] : []),
-        ...(trimEnd > trimStart ? ["-t", (trimEnd - trimStart).toFixed(2)] : []),
-        "-ar", String(sampleRate),
-        ...(filters.length > 0 ? ["-af", filters.join(",")] : []),
-        ...getFfmpegOutputArgs(format, bitrate),
-        outputPath
+      console.log(`Downloading audio via yt-dlp: ${title} -> ${format} ${bitrate}K`);
+
+      // Build postprocessor args for ffmpeg (sample rate, trim, EQ, fade).
+      const ppArgs = [
+        `-ar ${sampleRate}`,
+        filters.length > 0 ? `-af ${filters.join(",")}` : "",
+        trimStart > 0 ? `-ss ${trimStart.toFixed(2)}` : "",
+        trimEnd > trimStart ? `-to ${trimEnd.toFixed(2)}` : "",
+        `-metadata title=${quotePostprocessorValue(title)}`,
+        req.query.artist ? `-metadata artist=${quotePostprocessorValue(req.query.artist)}` : "",
+        req.query.album ? `-metadata album=${quotePostprocessorValue(req.query.album)}` : "",
+        req.query.genre ? `-metadata genre=${quotePostprocessorValue(req.query.genre)}` : "",
+        req.query.year ? `-metadata date=${quotePostprocessorValue(req.query.year)}` : ""
+      ].filter(Boolean).join(" ");
+      const ffmpegLocationArgs = await getFfmpegLocationArgs();
+
+      const ytdlpArgs = [
+        "--no-playlist",
+        "--no-mtime",
+        "--embed-metadata",
+        "--compat-options", "filename-sanitization",
+        "-f", "bestaudio/best",
+        "-x",
+        "--audio-format", YTDLP_AUDIO_FORMATS[format],
+        "--audio-quality", `${bitrate}k`,
+        "-o", path.join(jobDir, "%(title).100B.%(ext)s"),
+        ...(ppArgs ? ["--postprocessor-args", `ffmpeg:${ppArgs}`] : []),
+        ...ffmpegLocationArgs,
+        url
       ];
 
-      await new Promise<void>((resolve, reject) => {
-        const ffmpeg = spawn("ffmpeg", ffmpegArgs, { stdio: ["pipe", "ignore", "pipe"] });
-        let stderr = "";
-
-        ffmpeg.stderr.on("data", (chunk: Buffer) => {
-          stderr += chunk.toString();
-        });
-        ffmpeg.on("error", reject);
-        ffmpeg.on("close", (code) => {
-          if (code === 0) {
-            resolve();
-          } else {
-            reject(new Error(stderr.trim() || `ffmpeg exited with code ${code}`));
-          }
-        });
-        nodeStream.on("error", reject);
-        nodeStream.pipe(ffmpeg.stdin);
+      await runCommand(YTDLP_BIN, ytdlpArgs, {
+        cwd: process.cwd(),
+        timeout: 10 * 60 * 1000
       });
+
+      const files = await fsp.readdir(jobDir);
+      const outputFile = files.find((file) => file.toLowerCase().endsWith(`.${format}`)) || files[0];
+      if (!outputFile) {
+        throw new Error("No converted audio file was created.");
+      }
+      const finalOutputPath = path.join(jobDir, outputFile);
 
       const contentType = AUDIO_CONTENT_TYPES[format];
       const filename = `${title || "audio"}.${format}`;
 
-      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
       res.setHeader("Content-Type", contentType);
 
-      const stream = fs.createReadStream(outputPath);
+      const stream = fs.createReadStream(finalOutputPath);
       stream.pipe(res);
       res.on("finish", () => {
         fsp.rm(jobDir, { recursive: true, force: true }).catch(() => {});
