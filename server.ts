@@ -176,6 +176,12 @@ async function getFfmpegLocationArgs(): Promise<string[]> {
 
 async function getFfmpegExecutable(): Promise<string> {
   if (process.env.FFMPEG_PATH) {
+    try {
+      const ffmpegStat = await fsp.stat(process.env.FFMPEG_PATH);
+      if (ffmpegStat.isDirectory()) {
+        return path.join(process.env.FFMPEG_PATH, process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
+      }
+    } catch (_) {}
     return process.env.FFMPEG_PATH;
   }
 
@@ -209,7 +215,7 @@ function getOutputCodecArgs(format: SupportedFormat, bitrate: number): string[] 
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Math.round(clampNumber(process.env.PORT, 3000, 1, 65535));
   const startedAt = Date.now();
   // Path to bundled yt-dlp binary, with a local/root fallback for portable builds.
   const YTDLP_BIN = getBundledYtDlpPath(process.cwd());
