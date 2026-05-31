@@ -1,0 +1,14 @@
+node_modules
+dist
+coverage
+.git
+.qodo
+.tmp-audio
+.tmp-pyi
+*.log
+.env
+.env.*
+!.env.example
+.tmp-*
+*-player-script.js
+yt-dlp.exe

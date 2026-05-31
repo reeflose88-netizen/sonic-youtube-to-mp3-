@@ -27,3 +27,16 @@ npm start
 ```
 
 `npm run build` creates the Vite frontend and bundles the Express server to `dist/server.cjs`.
+
+## Deploy
+
+Use the included `Dockerfile` for hosts that support container deployments. The container installs `ffmpeg`, builds the React app, and starts the bundled Express server.
+
+For Render:
+
+1. Push this repository to GitHub.
+2. Create a new Render Blueprint or Web Service from the repo.
+3. Use the included `render.yaml`, or choose Docker runtime manually.
+4. Health check path: `/api/health`.
+
+The server reads `PORT` from the hosting environment and falls back to `3000` locally.
