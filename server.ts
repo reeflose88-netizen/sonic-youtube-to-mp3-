@@ -183,11 +183,25 @@ async function getFfmpegLocationArgs(): Promise<string[]> {
 async function startServer() {
   const app = express();
   const PORT = 3000;
+  const startedAt = Date.now();
+  // Path to bundled yt-dlp binary, with a local/root fallback for portable builds.
+  const YTDLP_BIN = getBundledYtDlpPath(process.cwd());
 
   // Middleware
   app.use(express.json());
 
-  // API Endpoints go here
+  app.get("/api/health", async (_req, res) => {
+    const ffmpegLocationArgs = await getFfmpegLocationArgs();
+    const ytdlpAvailable = YTDLP_BIN === "yt-dlp" || fs.existsSync(YTDLP_BIN);
+
+    res.json({
+      status: ytdlpAvailable ? "ready" : "degraded",
+      uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+      ffmpeg: ffmpegLocationArgs.length > 0 ? "available" : "path",
+      ytdlp: ytdlpAvailable ? "available" : "path",
+      formats: SUPPORTED_FORMATS
+    });
+  });
 
   // 1. Fetch metadata using YouTube oEmbed
   app.post("/api/metadata", async (req, res) => {
@@ -295,9 +309,6 @@ async function startServer() {
       res.status(500).json({ error: "YouTube search failed. Please paste a direct YouTube URL instead." });
     }
   });
-
-  // Path to bundled yt-dlp binary, with a local/root fallback for portable builds.
-  const YTDLP_BIN = getBundledYtDlpPath(process.cwd());
 
   // 3.5. Fetch real playlist tracks via yt-dlp (ytpl is broken by YouTube changes)
   app.post("/api/playlist", async (req, res) => {

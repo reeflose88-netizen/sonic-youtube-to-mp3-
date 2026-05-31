@@ -18,6 +18,14 @@ const AUDIO_BITRATES = [128, 192, 256, 320] as const;
 type AudioFormat = typeof AUDIO_FORMATS[number];
 type AudioBitrate = typeof AUDIO_BITRATES[number];
 
+interface BackendHealth {
+  status: "ready" | "degraded" | "offline";
+  uptimeSeconds: number;
+  ffmpeg: string;
+  ytdlp: string;
+  formats: string[];
+}
+
 function toAudioFormat(value: string): AudioFormat {
   return AUDIO_FORMATS.includes(value as AudioFormat) ? value as AudioFormat : "mp3";
 }
@@ -25,6 +33,14 @@ function toAudioFormat(value: string): AudioFormat {
 function toAudioBitrate(value: string | number): AudioBitrate {
   const parsed = Number(value);
   return AUDIO_BITRATES.includes(parsed as AudioBitrate) ? parsed as AudioBitrate : 320;
+}
+
+function formatUptime(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }
 
 const defaultSettings: AudioSettings = {
@@ -115,6 +131,13 @@ export default function App() {
     format: string; bitrate: number; timestamp: Date;
   }>>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [backendHealth, setBackendHealth] = useState<BackendHealth>({
+    status: "offline",
+    uptimeSeconds: 0,
+    ffmpeg: "unknown",
+    ytdlp: "unknown",
+    formats: []
+  });
 
   // Auto clean audio on component unmount
   useEffect(() => {
@@ -124,6 +147,30 @@ export default function App() {
       }
     };
   }, [audioUrl]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadHealth = async () => {
+      try {
+        const response = await fetch("/api/health");
+        if (!response.ok) throw new Error("Health check failed");
+        const data: BackendHealth = await response.json();
+        if (isMounted) setBackendHealth(data);
+      } catch (_) {
+        if (isMounted) {
+          setBackendHealth(prev => ({ ...prev, status: "offline" }));
+        }
+      }
+    };
+
+    loadHealth();
+    const interval = window.setInterval(loadHealth, 30000);
+    return () => {
+      isMounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   // Handle URL loading and metadata fetching
   const handleLoadMetadata = async (urlToLoad?: string) => {
@@ -798,11 +845,13 @@ export default function App() {
           
           <div className="flex items-center gap-6 text-xs text-zinc-500 font-semibold font-mono tracking-wide">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-[#00ff9d] animate-pulse"></span>
-              <span className="text-zinc-400">Ultra-Fast Cloud CDN Link Active</span>
+              <span className={`w-2 h-2 rounded-full ${backendHealth.status === "ready" ? "bg-[#00ff9d]" : backendHealth.status === "degraded" ? "bg-[#ffaa00]" : "bg-rose-500"} animate-pulse`}></span>
+              <span className="text-zinc-400">
+                Backend {backendHealth.status === "ready" ? "Ready" : backendHealth.status === "degraded" ? "Degraded" : "Offline"}
+              </span>
             </div>
             <span className="px-2.5 py-1 bg-[#ff4e00]/10 rounded-lg text-[10.5px] text-[#ff8c00] font-bold border border-[#ff4e00]/20">
-              BITRATE: 320KBPS HD
+              {backendHealth.formats.length || AUDIO_FORMATS.length} FORMATS
             </span>
             <button
               onClick={() => setShowHistory(true)}
@@ -1531,26 +1580,32 @@ export default function App() {
 
       </main>
 
-      {/* Humble craft credit line with active template stats indicators */}
+      {/* Live backend status */}
       <footer className="bg-[#0c0c0c] border-t border-white/5 py-8 px-6 md:px-12 text-zinc-500 mt-20 relative z-10">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-end gap-8">
           <div className="flex flex-col sm:flex-row gap-8 sm:gap-12 w-full md:w-auto">
             <div className="flex flex-col gap-1">
               <span className="text-zinc-600 text-[10px] uppercase tracking-widest font-mono">Processing Node</span>
-              <span className="text-xs font-mono text-[#00ff9d]">NY-CORE-04 // ACTIVE</span>
+              <span className={`text-xs font-mono ${backendHealth.status === "ready" ? "text-[#00ff9d]" : "text-[#ffaa00]"}`}>
+                LOCALHOST // {backendHealth.status.toUpperCase()}
+              </span>
             </div>
             <div className="flex flex-col gap-1">
-              <span className="text-zinc-600 text-[10px] uppercase tracking-widest font-mono">Throughput</span>
-              <span className="text-xs font-mono text-white">1.42 GB/S</span>
+              <span className="text-zinc-600 text-[10px] uppercase tracking-widest font-mono">Runtime</span>
+              <span className="text-xs font-mono text-white">{formatUptime(backendHealth.uptimeSeconds)}</span>
             </div>
             <div className="flex flex-col gap-1">
               <span className="text-zinc-600 text-[10px] uppercase tracking-widest font-mono">Queued Jobs</span>
-              <span className="text-xs font-mono text-white">14,291</span>
+              <span className="text-xs font-mono text-white">{queue.filter(item => item.status === "pending").length}</span>
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-zinc-600 text-[10px] uppercase tracking-widest font-mono">Transcoder</span>
+              <span className="text-xs font-mono text-white">YT-DLP {backendHealth.ytdlp.toUpperCase()} / FFMPEG {backendHealth.ffmpeg.toUpperCase()}</span>
             </div>
           </div>
 
           <div className="flex flex-col items-start md:items-end gap-2 w-full md:w-auto">
-            <span className="text-zinc-600 text-[10px] uppercase tracking-widest font-mono">Turbo Stream v2.4</span>
+            <span className="text-zinc-600 text-[10px] uppercase tracking-widest font-mono">Sonic Stream v2.5</span>
             <div className="flex gap-1">
               <div className="w-1 h-4 bg-[#ff4e00]"></div>
               <div className="w-1 h-6 bg-[#ff4e00]"></div>
