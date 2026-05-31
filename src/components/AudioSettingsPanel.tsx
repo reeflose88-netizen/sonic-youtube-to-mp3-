@@ -1,5 +1,5 @@
 import { AudioSettings } from "../types";
-import { Sliders, Volume2, Scissors, Music, Headphones, Flame } from "lucide-react";
+import { Sliders, Volume2, Scissors, Music, Headphones, Flame, AudioLines, Radio, Gauge, Sparkles, Timer, Waves, Mic2 } from "lucide-react";
 
 const EQ_PRESETS: Array<{ id: AudioSettings["equalizer"]; label: string }> = [
   { id: "flat", label: "Flat" },
@@ -9,6 +9,20 @@ const EQ_PRESETS: Array<{ id: AudioSettings["equalizer"]; label: string }> = [
   { id: "instrumental", label: "Acoustic Stage" },
   { id: "lofi", label: "Lo-Fi Vintage" },
 ];
+
+const CONVERSION_MODES: Array<{
+  id: AudioSettings["conversionMode"];
+  label: string;
+  description: string;
+}> = [
+  { id: "standard", label: "Standard", description: "Clean format conversion" },
+  { id: "audio_mix", label: "Audio Mix", description: "Balanced EQ and bus glue" },
+  { id: "mastering", label: "Mastering", description: "Loudness, polish, limiter" },
+  { id: "vocal_master", label: "Vocal Master", description: "Speech and lead clarity" },
+  { id: "club_master", label: "Club Master", description: "Wide, loud, bass-forward" },
+];
+
+const LOUDNESS_TARGETS: AudioSettings["loudnessTarget"][] = [-18, -16, -14, -12, -10];
 
 interface AudioSettingsPanelProps {
   settings: AudioSettings;
@@ -48,6 +62,32 @@ export default function AudioSettingsPanel({ settings, durationSeconds = 220, on
         <h3 className="font-heading font-semibold tracking-tight text-white text-lg">
           High-Quality Transcoding Settings
         </h3>
+      </div>
+
+      {/* Conversion Mode Suite */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-2">
+        {CONVERSION_MODES.map((mode) => (
+          <button
+            key={mode.id}
+            type="button"
+            onClick={() => updateSetting("conversionMode", mode.id)}
+            className={`p-3 border rounded-xl text-left transition-all cursor-pointer ${
+              settings.conversionMode === mode.id
+                ? "border-[#ff4e00] bg-[#ff4e00]/10 shadow-[0_0_18px_rgba(255,78,0,0.16)]"
+                : "border-white/5 bg-[#080808] hover:border-white/15 hover:bg-white/5"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className={`text-xs font-extrabold uppercase tracking-wider ${
+                settings.conversionMode === mode.id ? "text-[#ff8c00]" : "text-white"
+              }`}>
+                {mode.label}
+              </span>
+              <AudioLines className={`w-4 h-4 ${settings.conversionMode === mode.id ? "text-[#ff4e00]" : "text-zinc-600"}`} />
+            </div>
+            <p className="text-[10px] text-zinc-500 mt-1 leading-snug">{mode.description}</p>
+          </button>
+        ))}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -180,6 +220,231 @@ export default function AudioSettingsPanel({ settings, durationSeconds = 220, on
           </p>
         </div>
 
+      </div>
+
+      {/* Mix and Master Controls */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-white/5 pt-6">
+        <div className="flex flex-col gap-3 bg-[#080808] p-4 rounded-xl border border-white/5">
+          <div className="flex justify-between items-center">
+            <label className="text-xs font-semibold text-zinc-400 font-sans tracking-wide uppercase flex items-center gap-1.5">
+              <Radio className="w-3.5 h-3.5 text-zinc-500" /> Stereo Width
+            </label>
+            <span className="text-xs font-mono font-bold text-white bg-zinc-800 px-2 py-0.5 rounded">
+              {(settings.stereoWidth * 100).toFixed(0)}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min="0.7"
+            max="2"
+            step="0.05"
+            value={settings.stereoWidth}
+            onChange={(e) => updateSetting("stereoWidth", parseFloat(e.target.value))}
+            className="h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#ff4e00]"
+          />
+        </div>
+
+        <div className="flex flex-col gap-3 bg-[#080808] p-4 rounded-xl border border-white/5">
+          <div className="flex justify-between items-center">
+            <label className="text-xs font-semibold text-zinc-400 font-sans tracking-wide uppercase flex items-center gap-1.5">
+              <Gauge className="w-3.5 h-3.5 text-zinc-500" /> Compression
+            </label>
+            <span className="text-xs font-mono font-bold text-white bg-zinc-800 px-2 py-0.5 rounded">
+              {settings.compression}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="5"
+            value={settings.compression}
+            onChange={(e) => updateSetting("compression", parseInt(e.target.value))}
+            className="h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#ffaa00]"
+          />
+        </div>
+
+        <div className="flex flex-col gap-3 bg-[#080808] p-4 rounded-xl border border-white/5">
+          <div className="flex justify-between items-center">
+            <label className="text-xs font-semibold text-zinc-400 font-sans tracking-wide uppercase flex items-center gap-1.5">
+              <Volume2 className="w-3.5 h-3.5 text-zinc-500" /> Limiter Ceiling
+            </label>
+            <span className="text-xs font-mono font-bold text-white bg-zinc-800 px-2 py-0.5 rounded">
+              {(settings.limiterCeiling * 100).toFixed(0)}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min="0.85"
+            max="1"
+            step="0.01"
+            value={settings.limiterCeiling}
+            onChange={(e) => updateSetting("limiterCeiling", parseFloat(e.target.value))}
+            className="h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#ff4e00]"
+          />
+        </div>
+      </div>
+
+      {/* Restoration and Loudness Controls */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-white/5 pt-6">
+        <div className="flex flex-col gap-4 bg-[#080808] p-4 rounded-xl border border-white/5">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-xs font-semibold text-zinc-400 font-sans tracking-wide uppercase flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-zinc-500" /> Noise Cleanup
+            </label>
+            <span className="text-xs font-mono font-bold text-white bg-zinc-800 px-2 py-0.5 rounded">
+              {settings.noiseReduction}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="5"
+            value={settings.noiseReduction}
+            onChange={(e) => updateSetting("noiseReduction", parseInt(e.target.value))}
+            className="h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#ffaa00]"
+          />
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex flex-col gap-2">
+              <div className="flex justify-between text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">
+                <span>High-Pass</span>
+                <span className="font-mono text-[#ffaa00]">{settings.highPass}Hz</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="400"
+                step="5"
+                value={settings.highPass}
+                onChange={(e) => updateSetting("highPass", parseInt(e.target.value))}
+                className="h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#ff4e00]"
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <div className="flex justify-between text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">
+                <span>Low-Pass</span>
+                <span className="font-mono text-[#ffaa00]">{settings.lowPass >= 20000 ? "Open" : `${settings.lowPass}Hz`}</span>
+              </div>
+              <input
+                type="range"
+                min="4000"
+                max="20000"
+                step="250"
+                value={settings.lowPass}
+                onChange={(e) => updateSetting("lowPass", parseInt(e.target.value))}
+                className="h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#ff4e00]"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-4 bg-[#080808] p-4 rounded-xl border border-white/5">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-xs font-semibold text-zinc-400 font-sans tracking-wide uppercase flex items-center gap-1.5">
+              <Waves className="w-3.5 h-3.5 text-zinc-500" /> Loudness Normalizer
+            </label>
+            <button
+              type="button"
+              onClick={() => updateSetting("normalizeLoudness", !settings.normalizeLoudness)}
+              className={`px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider border transition-all cursor-pointer ${
+                settings.normalizeLoudness
+                  ? "bg-[#ff4e00] border-[#ff4e00] text-white"
+                  : "bg-zinc-950 border-white/10 text-zinc-500 hover:text-white"
+              }`}
+            >
+              {settings.normalizeLoudness ? "On" : "Off"}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-5 gap-1.5">
+            {LOUDNESS_TARGETS.map((target) => (
+              <button
+                key={target}
+                type="button"
+                onClick={() => updateSetting("loudnessTarget", target)}
+                disabled={!settings.normalizeLoudness}
+                className={`py-2 rounded-lg text-[10px] font-bold font-mono border transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-35 ${
+                  settings.loudnessTarget === target
+                    ? "bg-white text-black border-white"
+                    : "bg-zinc-950 text-zinc-400 border-white/10 hover:text-white"
+                }`}
+              >
+                {target}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10.5px] text-zinc-500 font-sans leading-snug">
+            Target is measured in LUFS. Lower values preserve headroom; higher values push louder exports for car, club, or phone playback.
+          </p>
+        </div>
+      </div>
+
+      {/* Playback and Channel Controls */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-white/5 pt-6">
+        <div className="flex flex-col gap-3 bg-[#080808] p-4 rounded-xl border border-white/5">
+          <div className="flex justify-between items-center">
+            <label className="text-xs font-semibold text-zinc-400 font-sans tracking-wide uppercase flex items-center gap-1.5">
+              <Timer className="w-3.5 h-3.5 text-zinc-500" /> Tempo
+            </label>
+            <span className="text-xs font-mono font-bold text-white bg-zinc-800 px-2 py-0.5 rounded">
+              {(settings.tempo * 100).toFixed(0)}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min="0.75"
+            max="1.25"
+            step="0.01"
+            value={settings.tempo}
+            onChange={(e) => updateSetting("tempo", parseFloat(e.target.value))}
+            className="h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#ffaa00]"
+          />
+        </div>
+
+        <div className="flex flex-col gap-3 bg-[#080808] p-4 rounded-xl border border-white/5">
+          <div className="flex justify-between items-center">
+            <label className="text-xs font-semibold text-zinc-400 font-sans tracking-wide uppercase flex items-center gap-1.5">
+              <Mic2 className="w-3.5 h-3.5 text-zinc-500" /> Pitch Shift
+            </label>
+            <span className="text-xs font-mono font-bold text-white bg-zinc-800 px-2 py-0.5 rounded">
+              {settings.pitchShift > 0 ? "+" : ""}{settings.pitchShift} st
+            </span>
+          </div>
+          <input
+            type="range"
+            min="-12"
+            max="12"
+            step="1"
+            value={settings.pitchShift}
+            onChange={(e) => updateSetting("pitchShift", parseInt(e.target.value))}
+            className="h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#ff4e00]"
+          />
+        </div>
+
+        <div className="flex flex-col gap-2 bg-[#080808] p-4 rounded-xl border border-white/5">
+          <label className="text-xs font-semibold text-zinc-400 font-sans tracking-wide uppercase flex items-center gap-1.5">
+            <Radio className="w-3.5 h-3.5 text-zinc-500" /> Output Channel
+          </label>
+          <div className="grid grid-cols-2 gap-1.5 p-1 bg-zinc-950 rounded-xl border border-white/5">
+            {(["stereo", "mono"] as const).map((channel) => (
+              <button
+                key={channel}
+                type="button"
+                onClick={() => updateSetting("channelMode", channel)}
+                className={`py-2 rounded-lg text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                  settings.channelMode === channel
+                    ? "bg-[#ff4e00] text-white"
+                    : "text-zinc-500 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                {channel}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Interactive Timing & Scissoring Options */}

@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { 
   Youtube, Sparkles, Music, Sliders, Play, Pause, AlertTriangle, 
   ArrowRight, Compass, ExternalLink, Download, Clock, Library, ListTodo, User,
-  Trash2, Plus, RefreshCw, Bot, CheckCircle2, FolderPlus, DownloadCloud, PlayCircle, History, X
+  Trash2, Plus, RefreshCw, Bot, CheckCircle2, FolderPlus, DownloadCloud, PlayCircle, History, X,
+  FileDown, FileUp, Search, Filter, RotateCcw, Layers
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -15,8 +16,13 @@ import ConsoleOutput from "./components/ConsoleOutput";
 
 const AUDIO_FORMATS = ["mp3", "wav", "aac", "flac", "m4a", "ogg"] as const;
 const AUDIO_BITRATES = [128, 192, 256, 320] as const;
+const CONVERSION_STEP_MS = 90;
+const QUEUE_PROGRESS_STEP_MS = 70;
+const QUEUE_PROGRESS_INCREMENT = 20;
 type AudioFormat = typeof AUDIO_FORMATS[number];
 type AudioBitrate = typeof AUDIO_BITRATES[number];
+type QueueStatusFilter = QueueItem["status"] | "all";
+type FilenameTemplate = "title_bitrate" | "artist_title" | "title_mode" | "artist_title_mode";
 
 interface BackendHealth {
   status: "ready" | "degraded" | "offline";
@@ -25,6 +31,27 @@ interface BackendHealth {
   ytdlp: string;
   formats: string[];
 }
+
+interface DownloadHistoryItem {
+  id: string;
+  title: string;
+  artist: string;
+  url: string;
+  format: string;
+  bitrate: number;
+  timestamp: Date;
+}
+
+interface SonicWorkspace {
+  settings?: AudioSettings;
+  tags?: ID3Tags;
+  queue?: QueueItem[];
+  downloadHistory?: Array<Omit<DownloadHistoryItem, "timestamp"> & { timestamp: string }>;
+  recentUrls?: string[];
+  filenameTemplate?: FilenameTemplate;
+}
+
+const WORKSPACE_STORAGE_KEY = "sonicmp3.workspace.v1";
 
 function toAudioFormat(value: string): AudioFormat {
   return AUDIO_FORMATS.includes(value as AudioFormat) ? value as AudioFormat : "mp3";
@@ -43,12 +70,64 @@ function formatUptime(seconds: number) {
   return `${hours}h ${minutes % 60}m`;
 }
 
+function normalizeQueueItem(item: QueueItem): QueueItem {
+  return {
+    ...item,
+    status: item.status === "completed" || item.status === "failed" ? "pending" : item.status,
+    progress: item.status === "completed" || item.status === "failed" ? 0 : item.progress,
+    bitrate: toAudioBitrate(item.bitrate),
+    format: toAudioFormat(item.format)
+  };
+}
+
+function safeFilenamePart(value: string, fallback = "Audio"): string {
+  return (value || fallback)
+    .replace(/[<>:"/\\|?*\r\n]/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 90) || fallback;
+}
+
+function toFilenameTemplate(value: string | undefined): FilenameTemplate {
+  return value === "artist_title" || value === "title_mode" || value === "artist_title_mode"
+    ? value
+    : "title_bitrate";
+}
+
+function buildDownloadFilename(
+  template: FilenameTemplate,
+  details: { title: string; artist?: string; bitrate: number; format: string; mode?: string }
+) {
+  const title = safeFilenamePart(details.title, "Audio");
+  const artist = safeFilenamePart(details.artist || "Unknown_Artist", "Unknown_Artist");
+  const mode = safeFilenamePart((details.mode || "standard").replace(/_/g, " "), "standard");
+  const base =
+    template === "artist_title" ? `${artist}_${title}` :
+    template === "title_mode" ? `${title}_${mode}` :
+    template === "artist_title_mode" ? `${artist}_${title}_${mode}` :
+    `${title}_${details.bitrate}kbps`;
+  return `${base}.${details.format}`;
+}
+
 const defaultSettings: AudioSettings = {
   format: "mp3",
   bitrate: 320,
   sampleRate: 48000,
+  conversionMode: "standard",
   equalizer: "flat",
+  channelMode: "stereo",
   volumeBoost: 1.0,
+  stereoWidth: 1.0,
+  compression: 35,
+  limiterCeiling: 0.95,
+  normalizeLoudness: false,
+  loudnessTarget: -14,
+  noiseReduction: 0,
+  highPass: 20,
+  lowPass: 20000,
+  tempo: 1,
+  pitchShift: 0,
   trimStart: 0,
   trimEnd: 220,
   fadeIn: 1,
@@ -75,7 +154,19 @@ function buildAudioEndpoint(url: string, format: string, bitrate: number, settin
     volumeBoost: String(settings.volumeBoost),
     fadeIn: String(settings.fadeIn),
     fadeOut: String(settings.fadeOut),
+    conversionMode: settings.conversionMode,
     equalizer: settings.equalizer,
+    channelMode: settings.channelMode,
+    stereoWidth: String(settings.stereoWidth),
+    compression: String(settings.compression),
+    limiterCeiling: String(settings.limiterCeiling),
+    normalizeLoudness: String(settings.normalizeLoudness),
+    loudnessTarget: String(settings.loudnessTarget),
+    noiseReduction: String(settings.noiseReduction),
+    highPass: String(settings.highPass),
+    lowPass: String(settings.lowPass),
+    tempo: String(settings.tempo),
+    pitchShift: String(settings.pitchShift),
     title: tags?.title || "Audio",
     artist: tags?.artist || "",
     album: tags?.album || "",
@@ -90,6 +181,34 @@ const PRESET_PLAYLISTS = [
   { name: "Lofi Focus Beats", url: "https://www.youtube.com/playlist?list=PLofmCYwrCzYF8-c5Mh2o9wL5b7JrkZ1sX" },
   { name: "Retro Synthwave", url: "https://www.youtube.com/playlist?list=PLz5fALZ0-mGsmM-Y_6-pU_O2VnLoxV3qH" },
   { name: "Deep Classical Focus", url: "https://www.youtube.com/playlist?list=PL3oW2tjiIxvSy0gU9v_cQc2m2fI7gqO8E" }
+];
+
+const AUDIO_PROFILES: Array<{ label: string; description: string; settings: Partial<AudioSettings> }> = [
+  {
+    label: "Studio Master",
+    description: "High-bitrate music archive",
+    settings: { format: "mp3", bitrate: 320, sampleRate: 48000, conversionMode: "mastering", equalizer: "flat", channelMode: "stereo", volumeBoost: 1, stereoWidth: 1.15, compression: 45, limiterCeiling: 0.94, normalizeLoudness: true, loudnessTarget: -14, noiseReduction: 0, highPass: 25, lowPass: 19000, tempo: 1, pitchShift: 0, fadeIn: 1, fadeOut: 2 }
+  },
+  {
+    label: "Podcast Voice",
+    description: "Clear speech with vocal focus",
+    settings: { format: "mp3", bitrate: 192, sampleRate: 44100, conversionMode: "vocal_master", equalizer: "vocal", channelMode: "mono", volumeBoost: 1.2, stereoWidth: 0.9, compression: 60, limiterCeiling: 0.93, normalizeLoudness: true, loudnessTarget: -16, noiseReduction: 30, highPass: 80, lowPass: 12000, tempo: 1, pitchShift: 0, fadeIn: 0, fadeOut: 1 }
+  },
+  {
+    label: "Lossless Vault",
+    description: "FLAC archival capture",
+    settings: { format: "flac", bitrate: 320, sampleRate: 48000, conversionMode: "standard", equalizer: "flat", channelMode: "stereo", volumeBoost: 1, stereoWidth: 1, compression: 0, limiterCeiling: 0.98, normalizeLoudness: false, loudnessTarget: -14, noiseReduction: 0, highPass: 20, lowPass: 20000, tempo: 1, pitchShift: 0, fadeIn: 0, fadeOut: 0 }
+  },
+  {
+    label: "Lo-Fi Cut",
+    description: "Warm, compressed playlist feel",
+    settings: { format: "mp3", bitrate: 256, sampleRate: 44100, conversionMode: "audio_mix", equalizer: "lofi", channelMode: "stereo", volumeBoost: 1.1, stereoWidth: 1.25, compression: 55, limiterCeiling: 0.92, normalizeLoudness: false, loudnessTarget: -14, noiseReduction: 10, highPass: 120, lowPass: 9000, tempo: 0.98, pitchShift: -1, fadeIn: 2, fadeOut: 3 }
+  },
+  {
+    label: "Club Master",
+    description: "Loud, wide DJ-ready export",
+    settings: { format: "mp3", bitrate: 320, sampleRate: 48000, conversionMode: "club_master", equalizer: "bass", channelMode: "stereo", volumeBoost: 1.15, stereoWidth: 1.45, compression: 70, limiterCeiling: 0.9, normalizeLoudness: true, loudnessTarget: -10, noiseReduction: 0, highPass: 30, lowPass: 18000, tempo: 1, pitchShift: 0, fadeIn: 0, fadeOut: 2 }
+  }
 ];
 
 export default function App() {
@@ -109,6 +228,9 @@ export default function App() {
   const [activeQueueIndex, setActiveQueueIndex] = useState(-1);
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
   const [isAutoTuningQueue, setIsAutoTuningQueue] = useState(false);
+  const [queueSearchTerm, setQueueSearchTerm] = useState("");
+  const [queueStatusFilter, setQueueStatusFilter] = useState<QueueStatusFilter>("all");
+  const [filenameTemplate, setFilenameTemplate] = useState<FilenameTemplate>("title_bitrate");
 
   // Operational states
   const [isFetchingMetadata, setIsFetchingMetadata] = useState(false);
@@ -126,11 +248,9 @@ export default function App() {
   const [audioPreviewElement, setAudioPreviewElement] = useState<HTMLAudioElement | null>(null);
 
   // Download history
-  const [downloadHistory, setDownloadHistory] = useState<Array<{
-    id: string; title: string; artist: string; url: string;
-    format: string; bitrate: number; timestamp: Date;
-  }>>([]);
+  const [downloadHistory, setDownloadHistory] = useState<DownloadHistoryItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [recentUrls, setRecentUrls] = useState<string[]>([]);
   const [backendHealth, setBackendHealth] = useState<BackendHealth>({
     status: "offline",
     uptimeSeconds: 0,
@@ -138,6 +258,22 @@ export default function App() {
     ytdlp: "unknown",
     formats: []
   });
+  const [isWorkspaceReady, setIsWorkspaceReady] = useState(false);
+  const queueFileInputRef = useRef<HTMLInputElement | null>(null);
+  const queueStats = {
+    pending: queue.filter(item => item.status === "pending").length,
+    active: queue.filter(item => ["fetching_meta", "optimizing_tags", "converting"].includes(item.status)).length,
+    completed: queue.filter(item => item.status === "completed").length,
+    failed: queue.filter(item => item.status === "failed").length
+  };
+  const filteredQueueEntries = queue
+    .map((item, idx) => ({ item, idx }))
+    .filter(({ item }) => queueStatusFilter === "all" || item.status === queueStatusFilter)
+    .filter(({ item }) => {
+      const query = queueSearchTerm.trim().toLowerCase();
+      if (!query) return true;
+      return `${item.title} ${item.artist} ${item.url}`.toLowerCase().includes(query);
+    });
 
   // Auto clean audio on component unmount
   useEffect(() => {
@@ -147,6 +283,50 @@ export default function App() {
       }
     };
   }, [audioUrl]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(WORKSPACE_STORAGE_KEY);
+      if (raw) {
+        const workspace = JSON.parse(raw) as SonicWorkspace;
+        if (workspace.settings) setSettings({ ...defaultSettings, ...workspace.settings });
+        if (workspace.tags) setTags({ ...defaultID3, ...workspace.tags });
+        if (workspace.queue) setQueue(workspace.queue.map(normalizeQueueItem));
+        if (workspace.recentUrls) setRecentUrls(workspace.recentUrls.slice(0, 8));
+        setFilenameTemplate(toFilenameTemplate(workspace.filenameTemplate));
+        if (workspace.downloadHistory) {
+          setDownloadHistory(workspace.downloadHistory.map(item => ({
+            ...item,
+            timestamp: new Date(item.timestamp)
+          })).filter(item => !Number.isNaN(item.timestamp.getTime())));
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to restore Sonic workspace:", err);
+    } finally {
+      setIsWorkspaceReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isWorkspaceReady) return;
+    try {
+      const workspace: SonicWorkspace = {
+        settings,
+        tags,
+        queue,
+        recentUrls,
+        filenameTemplate,
+        downloadHistory: downloadHistory.map(item => ({
+          ...item,
+          timestamp: item.timestamp.toISOString()
+        }))
+      };
+      window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(workspace));
+    } catch (err) {
+      console.warn("Failed to save Sonic workspace:", err);
+    }
+  }, [isWorkspaceReady, settings, tags, queue, recentUrls, filenameTemplate, downloadHistory]);
 
   useEffect(() => {
     let isMounted = true;
@@ -202,6 +382,7 @@ export default function App() {
 
       const data: VideoMetadata = await response.json();
       setVideoMetadata(data);
+      setRecentUrls(prev => [activeUrl, ...prev.filter(item => item !== activeUrl)].slice(0, 8));
       if (urlToLoad) {
         setYoutubeUrl(urlToLoad);
       }
@@ -267,6 +448,11 @@ export default function App() {
   // 1. Add current metadata stream as a batch task
   const handleAddToQueue = () => {
     if (!videoMetadata) return;
+    if (queue.some(item => item.url === videoMetadata.url)) {
+      setLogs(prev => [...prev, `QUEUE: Skipped duplicate source "${tags.title || videoMetadata.title}".`]);
+      return;
+    }
+
     const newItem: QueueItem = {
       id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
       url: videoMetadata.url,
@@ -284,6 +470,11 @@ export default function App() {
 
   // 1b. Directly append external search results to the batch transcoder list
   const handleAddUrlToQueue = (url: string, title: string, artist: string) => {
+    if (queue.some(item => item.url === url)) {
+      setLogs(prev => [...prev, `QUEUE: Skipped duplicate search result "${title}".`]);
+      return;
+    }
+
     const newItem: QueueItem = {
       id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
       url,
@@ -325,7 +516,13 @@ export default function App() {
       }
 
       const tracks = await response.json();
-      const newItems: QueueItem[] = tracks.map((track: { title: string; channel: string; url: string }) => ({
+      const seenUrls = new Set(queue.map(item => item.url));
+      const uniqueTracks = (tracks as Array<{ title: string; channel: string; url: string }>).filter(track => {
+        if (seenUrls.has(track.url)) return false;
+        seenUrls.add(track.url);
+        return true;
+      });
+      const newItems: QueueItem[] = uniqueTracks.map((track: { title: string; channel: string; url: string }) => ({
         id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
         url: track.url,
         title: track.title,
@@ -337,11 +534,11 @@ export default function App() {
         thumbnailUrl: "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=120&auto=format&fit=crop"
       }));
 
-      setFetchedPlaylistTracks(tracks);
+      setFetchedPlaylistTracks(uniqueTracks);
       setQueue(prev => [...prev, ...newItems]);
       setLogs(prev => [
         ...prev, 
-        `PLAYLIST_PARSER: Discovered and injected ${tracks.length} active tracks into the batch conversion list.`
+        `PLAYLIST_PARSER: Discovered ${tracks.length} tracks and injected ${newItems.length} unique tracks into the batch conversion list.`
       ]);
       setPlaylistUrl(""); // Clear input on success
     } catch (err: any) {
@@ -368,6 +565,127 @@ export default function App() {
     setActiveQueueIndex(-1);
     setIsProcessingQueue(false);
     setLogs(prev => [...prev, "QUEUE: Transcoding queue slate cleared."]);
+  };
+
+  const handleRetryFinishedQueueItems = () => {
+    const retryCount = queue.filter(item => item.status === "failed" || item.status === "completed").length;
+    if (retryCount === 0) return;
+    setQueue(prev => prev.map(item => (
+      item.status === "failed" || item.status === "completed"
+        ? { ...item, status: "pending", progress: 0, error: undefined }
+        : item
+    )));
+    setLogs(prev => [...prev, `QUEUE: Reset ${retryCount} finished item${retryCount === 1 ? "" : "s"} back to pending.`]);
+  };
+
+  const handleRemoveCompletedQueueItems = () => {
+    const completedCount = queue.filter(item => item.status === "completed").length;
+    if (completedCount === 0) return;
+    setQueue(prev => prev.filter(item => item.status !== "completed"));
+    setLogs(prev => [...prev, `QUEUE: Removed ${completedCount} completed item${completedCount === 1 ? "" : "s"} from the queue.`]);
+  };
+
+  const handleDeduplicateQueue = () => {
+    const seenUrls = new Set<string>();
+    const dedupedQueue = queue.filter(item => {
+      if (seenUrls.has(item.url)) {
+        return false;
+      }
+      seenUrls.add(item.url);
+      return true;
+    });
+    const removedCount = queue.length - dedupedQueue.length;
+    if (removedCount === 0) return;
+    setQueue(dedupedQueue);
+    setLogs(prev => [...prev, `QUEUE: Removed ${removedCount} duplicate item${removedCount === 1 ? "" : "s"}.`]);
+  };
+
+  const handleExportQueue = () => {
+    if (queue.length === 0) return;
+
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      app: "SonicMP3",
+      queue: queue.map(item => normalizeQueueItem(item))
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const localUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = localUrl;
+    link.download = `sonicmp3-queue-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(localUrl);
+    setLogs(prev => [...prev, `QUEUE_BACKUP: Exported ${queue.length} queue item${queue.length === 1 ? "" : "s"} to JSON.`]);
+  };
+
+  const handleExportM3U = () => {
+    if (queue.length === 0) return;
+
+    const playlistText = [
+      "#EXTM3U",
+      ...queue.flatMap(item => [
+        `#EXTINF:-1,${item.artist} - ${item.title}`,
+        item.url
+      ])
+    ].join("\n");
+    const blob = new Blob([playlistText], { type: "audio/x-mpegurl" });
+    const localUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = localUrl;
+    link.download = `sonicmp3-playlist-${new Date().toISOString().slice(0, 10)}.m3u`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(localUrl);
+    setLogs(prev => [...prev, `PLAYLIST_EXPORT: Exported ${queue.length} source link${queue.length === 1 ? "" : "s"} as M3U.`]);
+  };
+
+  const handleImportQueueFile = async (file: File | null) => {
+    if (!file) return;
+
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as { queue?: QueueItem[] } | QueueItem[];
+      const importedQueue = Array.isArray(parsed) ? parsed : parsed.queue;
+      if (!Array.isArray(importedQueue)) {
+        throw new Error("This file does not contain a Sonic queue.");
+      }
+
+      const safeQueue = importedQueue
+        .filter(item => item && item.url && item.title)
+        .map(item => normalizeQueueItem({
+          ...item,
+          id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
+          artist: item.artist || "Unknown Artist",
+          status: "pending",
+          progress: 0
+        }));
+
+      if (safeQueue.length === 0) {
+        throw new Error("No usable queue items were found.");
+      }
+
+      setQueue(prev => [...prev, ...safeQueue]);
+      setLogs(prev => [...prev, `QUEUE_BACKUP: Imported ${safeQueue.length} item${safeQueue.length === 1 ? "" : "s"} from ${file.name}.`]);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Failed to import queue backup.");
+    } finally {
+      if (queueFileInputRef.current) {
+        queueFileInputRef.current.value = "";
+      }
+    }
+  };
+
+  const handleApplyAudioProfile = (profile: typeof AUDIO_PROFILES[number]) => {
+    setSettings(prev => ({
+      ...prev,
+      ...profile.settings,
+      trimStart: prev.trimStart,
+      trimEnd: prev.trimEnd
+    }));
+    setLogs(prev => [...prev, `AUDIO_PROFILE: Applied ${profile.label} profile.`]);
   };
 
   // 6. Bulk local Smart-Tuning cleanup for ID3 field structure
@@ -492,7 +810,7 @@ export default function App() {
       // 3. Simulating transcoding progress
       let p = 0;
       const progressInterval = setInterval(async () => {
-        p += 10;
+        p += QUEUE_PROGRESS_INCREMENT;
         setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, progress: p } : item));
 
         if (p >= 100) {
@@ -511,7 +829,13 @@ export default function App() {
 
               const downloadLink = document.createElement("a");
               downloadLink.href = localUrl;
-              downloadLink.download = `${finalTitle.trim().replace(/\s+/g, "_") || "Audio"}_${activeItem.bitrate}kbps.${activeItem.format}`;
+              downloadLink.download = buildDownloadFilename(filenameTemplate, {
+                title: finalTitle,
+                artist: finalArtist,
+                bitrate: activeItem.bitrate,
+                format: activeItem.format,
+                mode: settings.conversionMode
+              });
               document.body.appendChild(downloadLink);
               downloadLink.click();
               document.body.removeChild(downloadLink);
@@ -536,7 +860,7 @@ export default function App() {
             setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] FAILED: Transcoded file discharge failed for: "${finalTitle}".`]);
           }
         }
-      }, 150);
+      }, QUEUE_PROGRESS_STEP_MS);
     };
 
     runProcessItem();
@@ -553,21 +877,25 @@ export default function App() {
     setIsPlaying(false);
     setLogs([]);
 
-    const totalSteps = 10;
-    let currentStep = 0;
-
     const logMessages = [
       "CORE_DAEMON: Initializing high-speed audio transcoder daemon...",
       `NET_RESOLVER: Pinging secure audio stream channel for video ID: ${youtubeUrl}...`,
       "STREAM_CRAWLER: Hooked into high-fidelity adaptive streaming packets...",
+      `MODE_ROUTER: Conversion mode resolved to [${settings.conversionMode.replace(/_/g, " ").toUpperCase()}]...`,
       `DSP_FILTER: Aligning active equalizers under preset [${settings.equalizer.toUpperCase()}] profile...`,
       `DYNAMIC_GAIN: Amplification buffer injected successfully. Gain coefficient updated -> ${(settings.volumeBoost * 100).toFixed(0)}%`,
+      `MIX_BUS: Stereo width ${(settings.stereoWidth * 100).toFixed(0)}%, compression ${settings.compression}%, limiter ceiling ${(settings.limiterCeiling * 100).toFixed(0)}%...`,
+      `RESTORE_CHAIN: Noise reduction ${settings.noiseReduction}%, high-pass ${settings.highPass}Hz, low-pass ${settings.lowPass}Hz...`,
+      `TIME_PITCH: Tempo ${(settings.tempo * 100).toFixed(0)}%, pitch shift ${settings.pitchShift > 0 ? "+" : ""}${settings.pitchShift} semitone(s), ${settings.channelMode.toUpperCase()} output...`,
+      `LOUDNESS: ${settings.normalizeLoudness ? `Normalizing to ${settings.loudnessTarget} LUFS` : "Preserving source loudness"}...`,
       `TRANSCODER_TRIM: Registering start cutting position (${settings.trimStart}s) to end point (${settings.trimEnd}s)...`,
       `SAMPLER_ENGINE: Stereophonic distribution synced. Audio sample-rate configured to ${settings.sampleRate} Hz...`,
       `PACKAGER: Building lossless high-bitrate frame blocks [${settings.bitrate} kbps] for ${settings.format.toUpperCase()} Container...`,
       `ID3_METADATA: Encoding ID3 tags. Title: [${tags.title}], Artist: [${tags.artist}], Genre: [${tags.genre}], Year: [${tags.year}]...`,
       "TRANSCODER_SUCCESS: Conversion successfully finalized. Bundled audio stream exported to browser cache!"
     ];
+    const totalSteps = logMessages.length;
+    let currentStep = 0;
 
     const interval = setInterval(async () => {
       currentStep++;
@@ -606,7 +934,13 @@ export default function App() {
             // Programmatically download the file instantly!
             const downloadLink = document.createElement("a");
             downloadLink.href = localUrl;
-            downloadLink.download = `${tags.title.trim().replace(/\s+/g, "_") || "Audio"}_${settings.bitrate}kbps.${settings.format}`;
+            downloadLink.download = buildDownloadFilename(filenameTemplate, {
+              title: tags.title || videoMetadata?.title || "Audio",
+              artist: tags.artist || videoMetadata?.author,
+              bitrate: settings.bitrate,
+              format: settings.format,
+              mode: settings.conversionMode
+            });
             document.body.appendChild(downloadLink);
             downloadLink.click();
             document.body.removeChild(downloadLink);
@@ -624,7 +958,7 @@ export default function App() {
         setIsConverting(false);
         setIsCompleted(true);
       }
-    }, 450); // fast, snappy conversion speed as requested!
+    }, CONVERSION_STEP_MS);
   };
 
   // Custom audio playback preview controller
@@ -853,6 +1187,22 @@ export default function App() {
             <span className="px-2.5 py-1 bg-[#ff4e00]/10 rounded-lg text-[10.5px] text-[#ff8c00] font-bold border border-[#ff4e00]/20">
               {backendHealth.formats.length || AUDIO_FORMATS.length} FORMATS
             </span>
+            <input
+              ref={queueFileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => handleImportQueueFile(event.target.files?.[0] || null)}
+            />
+            <button
+              type="button"
+              onClick={() => queueFileInputRef.current?.click()}
+              disabled={isProcessingQueue}
+              className="relative flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10.5px] font-bold text-zinc-300 hover:text-white transition-all cursor-pointer disabled:opacity-50"
+            >
+              <FileUp className="w-3.5 h-3.5" />
+              Import Queue
+            </button>
             <button
               onClick={() => setShowHistory(true)}
               className="relative flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10.5px] font-bold text-zinc-300 hover:text-white transition-all cursor-pointer"
@@ -960,6 +1310,27 @@ export default function App() {
                       )}
                     </button>
                   </div>
+
+                  {recentUrls.length > 0 && (
+                    <div className="flex flex-col gap-2">
+                      <span className="text-[10px] font-bold text-zinc-500 font-mono uppercase tracking-wider">
+                        Recent sources:
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {recentUrls.map((url) => (
+                          <button
+                            key={url}
+                            type="button"
+                            onClick={() => setYoutubeUrl(url)}
+                            className="max-w-full truncate px-3 py-1.5 bg-zinc-950 hover:bg-[#ff4e00]/10 border border-white/5 hover:border-[#ff4e00]/30 text-[10.5px] font-semibold text-zinc-400 hover:text-white rounded-lg transition-all cursor-pointer"
+                            title={url}
+                          >
+                            {url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 52)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Loaded Video Metadata Card */}
                   {videoMetadata && (
@@ -1193,6 +1564,24 @@ export default function App() {
                 <div className="flex items-center gap-2.5 shrink-0">
                   <button
                     type="button"
+                    onClick={handleExportQueue}
+                    disabled={isProcessingQueue || queue.length === 0}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 rounded-lg text-[11px] font-bold text-zinc-400 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    Export
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportM3U}
+                    disabled={isProcessingQueue || queue.length === 0}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 rounded-lg text-[11px] font-bold text-zinc-400 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <Music className="w-3.5 h-3.5" />
+                    M3U
+                  </button>
+                  <button
+                    type="button"
                     onClick={handleAutoTuneQueue}
                     disabled={isAutoTuningQueue || isProcessingQueue}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-[#ff4e00]/10 hover:bg-[#ff4e00]/20 border border-[#ff4e00]/20 rounded-lg text-[11px] font-bold text-[#ff8c00] transition-colors cursor-pointer disabled:opacity-50"
@@ -1208,6 +1597,79 @@ export default function App() {
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     Clear Slate
+                  </button>
+                </div>
+              </div>
+
+              {/* Queue Overview & Search */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 relative z-10">
+                {([
+                  ["Pending", queueStats.pending, "text-zinc-300"],
+                  ["Active", queueStats.active, "text-[#ffaa00]"],
+                  ["Done", queueStats.completed, "text-[#00ff9d]"],
+                  ["Failed", queueStats.failed, "text-rose-400"]
+                ] as const).map(([label, value, color]) => (
+                  <div key={label} className="bg-[#080808] border border-white/5 rounded-xl px-3 py-2">
+                    <span className="block text-[9px] uppercase tracking-widest font-mono text-zinc-600">{label}</span>
+                    <span className={`text-lg font-heading font-black ${color}`}>{value}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="bg-[#080808] p-3 rounded-xl border border-white/5 flex flex-col lg:flex-row gap-3 relative z-10">
+                <div className="relative flex-1 min-w-0">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
+                  <input
+                    type="text"
+                    value={queueSearchTerm}
+                    onChange={(e) => setQueueSearchTerm(e.target.value)}
+                    placeholder="Search queue by track, artist, or URL"
+                    className="w-full pl-9 pr-3 py-2 bg-zinc-950 border border-white/10 rounded-lg text-xs text-white placeholder:text-zinc-600 focus:outline-hidden focus:border-[#ff4e00]"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <Filter className="w-3.5 h-3.5 text-zinc-600" />
+                    <select
+                      value={queueStatusFilter}
+                      onChange={(e) => setQueueStatusFilter(e.target.value as QueueStatusFilter)}
+                      className="bg-zinc-950 border border-white/10 text-zinc-300 rounded-lg px-2 py-2 text-[10px] font-mono focus:outline-hidden cursor-pointer focus:border-[#ff4e00]"
+                    >
+                      <option value="all">All Status</option>
+                      <option value="pending">Pending</option>
+                      <option value="fetching_meta">Scanning</option>
+                      <option value="optimizing_tags">Tagging</option>
+                      <option value="converting">Converting</option>
+                      <option value="completed">Completed</option>
+                      <option value="failed">Failed</option>
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRetryFinishedQueueItems}
+                    disabled={isProcessingQueue || (queueStats.completed + queueStats.failed) === 0}
+                    className="flex items-center gap-1.5 px-2.5 py-2 bg-zinc-950 hover:bg-zinc-900 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-400 hover:text-white transition-colors cursor-pointer disabled:opacity-40"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Retry Finished
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRemoveCompletedQueueItems}
+                    disabled={isProcessingQueue || queueStats.completed === 0}
+                    className="flex items-center gap-1.5 px-2.5 py-2 bg-zinc-950 hover:bg-zinc-900 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-400 hover:text-white transition-colors cursor-pointer disabled:opacity-40"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    Remove Done
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDeduplicateQueue}
+                    disabled={isProcessingQueue || queue.length < 2}
+                    className="flex items-center gap-1.5 px-2.5 py-2 bg-zinc-950 hover:bg-zinc-900 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-400 hover:text-white transition-colors cursor-pointer disabled:opacity-40"
+                  >
+                    <Layers className="w-3.5 h-3.5" />
+                    Dedupe
                   </button>
                 </div>
               </div>
@@ -1266,7 +1728,7 @@ export default function App() {
               {/* Grid List */}
               <div className="relative flex flex-col gap-2.5 max-h-80 overflow-y-auto pr-1">
                 <AnimatePresence initial={false}>
-                  {queue.map((item, idx) => {
+                  {filteredQueueEntries.map(({ item, idx }) => {
                     const isActive = idx === activeQueueIndex;
                     return (
                       <motion.div
@@ -1403,6 +1865,11 @@ export default function App() {
                     );
                   })}
                 </AnimatePresence>
+                {filteredQueueEntries.length === 0 && (
+                  <div className="bg-[#080808] border border-dashed border-white/10 rounded-xl py-8 text-center">
+                    <p className="text-xs font-semibold text-zinc-500">No queue items match the current filter.</p>
+                  </div>
+                )}
               </div>
 
               {/* Action triggers */}
@@ -1436,6 +1903,43 @@ export default function App() {
                 onTriggerOptimize={() => triggerTagOptimization(tags.title, tags.artist)}
                 hasVideoLoaded={!!videoMetadata}
               />
+
+              <div className="bg-[#121212] rounded-2xl border border-white/5 p-5 shadow-2xl flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-[#ff4e00]" />
+                    <h3 className="font-heading font-semibold text-white text-base">Quick Studio Profiles</h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettings(prev => ({
+                        ...defaultSettings,
+                        trimStart: prev.trimStart,
+                        trimEnd: prev.trimEnd
+                      }));
+                      setLogs(prev => [...prev, "AUDIO_PROFILE: Reset studio profile to default conversion settings."]);
+                    }}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-950 hover:bg-zinc-900 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-500 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Reset
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-2">
+                  {AUDIO_PROFILES.map((profile) => (
+                    <button
+                      key={profile.label}
+                      type="button"
+                      onClick={() => handleApplyAudioProfile(profile)}
+                      className="p-3 rounded-xl border border-white/5 bg-[#080808] hover:border-[#ff4e00]/35 hover:bg-[#ff4e00]/10 text-left transition-all cursor-pointer"
+                    >
+                      <span className="block text-xs font-black text-white uppercase tracking-wider">{profile.label}</span>
+                      <span className="block text-[10px] text-zinc-500 mt-1 leading-snug">{profile.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
 
               <AudioSettingsPanel
                 settings={settings}
@@ -1486,6 +1990,37 @@ export default function App() {
                 isCompleted={isCompleted}
                 speedMultiplier={(settings.bitrate === 320 ? 12 : settings.bitrate === 256 ? 15 : 18)}
               />
+
+              <div className="bg-[#080808] border border-white/5 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <FileDown className="w-4 h-4 text-[#ff4e00]" />
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-black text-zinc-400 uppercase tracking-widest font-mono">
+                      Filename Template
+                    </span>
+                    <span className="text-[10px] text-zinc-600 truncate max-w-[260px]">
+                      {buildDownloadFilename(filenameTemplate, {
+                        title: tags.title || videoMetadata.title,
+                        artist: tags.artist || videoMetadata.author,
+                        bitrate: settings.bitrate,
+                        format: settings.format,
+                        mode: settings.conversionMode
+                      })}
+                    </span>
+                  </div>
+                </div>
+                <select
+                  value={filenameTemplate}
+                  onChange={(e) => setFilenameTemplate(toFilenameTemplate(e.target.value))}
+                  disabled={isConverting}
+                  className="bg-zinc-950 border border-white/10 text-zinc-300 rounded-lg px-3 py-2 text-[10px] font-mono focus:outline-hidden cursor-pointer focus:border-[#ff4e00] disabled:opacity-50"
+                >
+                  <option value="title_bitrate">Title + bitrate</option>
+                  <option value="artist_title">Artist + title</option>
+                  <option value="title_mode">Title + mode</option>
+                  <option value="artist_title_mode">Artist + title + mode</option>
+                </select>
+              </div>
 
               {/* Progress Panel */}
               {isConverting && (
@@ -1671,7 +2206,13 @@ export default function App() {
                         });
                         const a = document.createElement("a");
                         a.href = ep;
-                        a.download = `${item.title.replace(/\s+/g,"_")}.${item.format}`;
+                        a.download = buildDownloadFilename(filenameTemplate, {
+                          title: item.title,
+                          artist: item.artist,
+                          bitrate: item.bitrate,
+                          format: item.format,
+                          mode: settings.conversionMode
+                        });
                         document.body.appendChild(a); a.click(); document.body.removeChild(a);
                       }}
                       className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] bg-[#ff4e00]/10 hover:bg-[#ff4e00]/20 text-[#ff8c00] border border-[#ff4e00]/20 px-2 py-1.5 rounded-lg font-bold cursor-pointer shrink-0"

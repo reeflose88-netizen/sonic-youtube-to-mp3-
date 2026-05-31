@@ -19,21 +19,19 @@ const AUDIO_CONTENT_TYPES: Record<SupportedFormat, string> = {
   ogg: "audio/ogg"
 };
 
-const YTDLP_AUDIO_FORMATS: Record<SupportedFormat, string> = {
-  mp3: "mp3",
-  wav: "wav",
-  aac: "aac",
-  flac: "flac",
-  m4a: "m4a",
-  ogg: "vorbis"
-};
-
 const EQ_FILTERS: Record<string, string> = {
   bass: "bass=g=6",
   vocal: "equalizer=f=1200:t=q:w=1:g=4",
   treble: "treble=g=5",
   instrumental: "acompressor=threshold=-18dB:ratio=2:attack=10:release=200",
   lofi: "lowpass=f=9000,highpass=f=120,acompressor=threshold=-16dB:ratio=3"
+};
+
+const MODE_FILTERS: Record<string, string> = {
+  audio_mix: "highpass=f=30,acompressor=threshold=-18dB:ratio=2.2:attack=12:release=180:makeup=1.5",
+  mastering: "acompressor=threshold=-16dB:ratio=3:attack=8:release=120:makeup=2",
+  vocal_master: "highpass=f=80,equalizer=f=3500:t=q:w=1:g=3,acompressor=threshold=-20dB:ratio=3:attack=6:release=160:makeup=2",
+  club_master: "bass=g=4,treble=g=2,acompressor=threshold=-14dB:ratio=3.5:attack=5:release=100:makeup=2"
 };
 
 function isSupportedFormat(format: string): format is SupportedFormat {
@@ -52,10 +50,6 @@ function getSafeFilename(name: string, fallback = "audio"): string {
     .replace(/\s+/g, " ")
     .trim()
     .substring(0, 100) || fallback;
-}
-
-function quotePostprocessorValue(value: unknown): string {
-  return `"${String(value).replace(/["\\]/g, "\\$&")}"`;
 }
 
 function buildLocalTags(rawTitle: string, rawAuthor = "Unknown Artist") {
@@ -177,6 +171,39 @@ async function getFfmpegLocationArgs(): Promise<string[]> {
     return executablePath ? ["--ffmpeg-location", path.dirname(executablePath)] : [];
   } catch (_) {
     return [];
+  }
+}
+
+async function getFfmpegExecutable(): Promise<string> {
+  if (process.env.FFMPEG_PATH) {
+    return process.env.FFMPEG_PATH;
+  }
+
+  const finderCommand = process.platform === "win32" ? "where.exe" : "which";
+  try {
+    const { stdout } = await execFileAsync(finderCommand, ["ffmpeg"], {
+      timeout: 5000,
+      windowsHide: true
+    });
+    return stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "ffmpeg";
+  } catch (_) {
+    return "ffmpeg";
+  }
+}
+
+function getOutputCodecArgs(format: SupportedFormat, bitrate: number): string[] {
+  switch (format) {
+    case "mp3":
+      return ["-c:a", "libmp3lame", "-b:a", `${bitrate}k`];
+    case "wav":
+      return ["-c:a", "pcm_s16le"];
+    case "flac":
+      return ["-c:a", "flac", "-compression_level", "8"];
+    case "ogg":
+      return ["-c:a", "libvorbis", "-b:a", `${bitrate}k`];
+    case "aac":
+    case "m4a":
+      return ["-c:a", "aac", "-b:a", `${bitrate}k`];
   }
 }
 
@@ -394,9 +421,21 @@ async function startServer() {
     const trimStart = clampNumber(req.query.trimStart, 0, 0, 24 * 60 * 60);
     const trimEnd = clampNumber(req.query.trimEnd, 0, 0, 24 * 60 * 60);
     const volumeBoost = clampNumber(req.query.volumeBoost, 1, 0.1, 2.5);
+    const stereoWidth = clampNumber(req.query.stereoWidth, 1, 0.7, 2);
+    const compression = clampNumber(req.query.compression, 35, 0, 100);
+    const limiterCeiling = clampNumber(req.query.limiterCeiling, 0.95, 0.85, 1);
+    const normalizeLoudness = String(req.query.normalizeLoudness || "false") === "true";
+    const loudnessTarget = clampNumber(req.query.loudnessTarget, -14, -24, -8);
+    const noiseReduction = clampNumber(req.query.noiseReduction, 0, 0, 100);
+    const highPass = Math.round(clampNumber(req.query.highPass, 20, 0, 1000));
+    const lowPass = Math.round(clampNumber(req.query.lowPass, 20000, 1000, 22000));
+    const tempo = clampNumber(req.query.tempo, 1, 0.75, 1.25);
+    const pitchShift = clampNumber(req.query.pitchShift, 0, -12, 12);
     const fadeIn = clampNumber(req.query.fadeIn, 0, 0, 60);
     const fadeOut = clampNumber(req.query.fadeOut, 0, 0, 60);
+    const conversionMode = String(req.query.conversionMode || "standard");
     const equalizer = String(req.query.equalizer || "flat");
+    const channelMode = String(req.query.channelMode || "stereo");
 
     if (!url) return res.status(400).send("YouTube URL is required.");
     if (!url.includes("youtube.com") && !url.includes("youtu.be")) {
@@ -413,50 +452,47 @@ async function startServer() {
 
     try {
       let title = getSafeFilename(String(req.query.title || ""));
-      const { Innertube } = await import("youtubei.js");
-      const youtube = await Innertube.create();
-      const info = await youtube.getBasicInfo(videoId);
-      title = title || getSafeFilename(info.basic_info.title || "");
+      if (!title || title === "audio") {
+        const { Innertube } = await import("youtubei.js");
+        const youtube = await Innertube.create();
+        const info = await youtube.getBasicInfo(videoId);
+        title = getSafeFilename(info.basic_info.title || "");
+      }
 
       await fsp.mkdir(tmpRoot, { recursive: true });
       jobDir = await fsp.mkdtemp(path.join(tmpRoot, "job-"));
+      const pitchFactor = Math.pow(2, pitchShift / 12);
       const filters = [
+        highPass > 0 ? `highpass=f=${highPass}` : "",
+        lowPass < 22000 ? `lowpass=f=${lowPass}` : "",
+        noiseReduction > 0 ? `afftdn=nr=${Math.max(1, Math.round(noiseReduction / 4))}` : "",
+        pitchShift !== 0 ? `asetrate=${Math.round(sampleRate * pitchFactor)},aresample=${sampleRate},atempo=${(1 / pitchFactor).toFixed(5)}` : "",
+        tempo !== 1 ? `atempo=${tempo.toFixed(3)}` : "",
         volumeBoost !== 1 ? `volume=${volumeBoost.toFixed(2)}` : "",
+        MODE_FILTERS[conversionMode] || "",
         EQ_FILTERS[equalizer] || "",
+        stereoWidth !== 1 && channelMode !== "mono" ? `aformat=channel_layouts=stereo,extrastereo=m=${stereoWidth.toFixed(2)}` : "",
+        compression > 0 ? `acompressor=threshold=-18dB:ratio=${(1 + compression / 25).toFixed(2)}:attack=10:release=160:makeup=${Math.max(1, compression / 45).toFixed(2)}` : "",
+        normalizeLoudness ? `loudnorm=I=${loudnessTarget.toFixed(1)}:TP=-1.5:LRA=9` : "",
+        conversionMode !== "standard" || compression > 0 || limiterCeiling < 0.98 ? `alimiter=limit=${limiterCeiling.toFixed(2)}` : "",
+        channelMode === "mono" ? "aformat=channel_layouts=stereo,pan=mono|c0=0.5*c0+0.5*c1" : "",
         fadeIn > 0 ? `afade=t=in:st=0:d=${fadeIn.toFixed(2)}` : "",
         fadeOut > 0 && trimEnd > trimStart
           ? `afade=t=out:st=${Math.max(0, trimEnd - trimStart - fadeOut).toFixed(2)}:d=${fadeOut.toFixed(2)}`
           : ""
       ].filter(Boolean);
 
-      console.log(`Downloading audio via yt-dlp: ${title} -> ${format} ${bitrate}K`);
-
-      // Build postprocessor args for ffmpeg (sample rate, trim, EQ, fade).
-      const ppArgs = [
-        `-ar ${sampleRate}`,
-        filters.length > 0 ? `-af ${filters.join(",")}` : "",
-        trimStart > 0 ? `-ss ${trimStart.toFixed(2)}` : "",
-        trimEnd > trimStart ? `-to ${trimEnd.toFixed(2)}` : "",
-        `-metadata title=${quotePostprocessorValue(title)}`,
-        req.query.artist ? `-metadata artist=${quotePostprocessorValue(req.query.artist)}` : "",
-        req.query.album ? `-metadata album=${quotePostprocessorValue(req.query.album)}` : "",
-        req.query.genre ? `-metadata genre=${quotePostprocessorValue(req.query.genre)}` : "",
-        req.query.year ? `-metadata date=${quotePostprocessorValue(req.query.year)}` : ""
-      ].filter(Boolean).join(" ");
-      const ffmpegLocationArgs = await getFfmpegLocationArgs();
+      console.log(`Downloading source audio via yt-dlp: ${title}`);
 
       const ytdlpArgs = [
         "--no-playlist",
         "--no-mtime",
-        "--embed-metadata",
+        "--concurrent-fragments", "8",
+        "--retries", "3",
+        "--fragment-retries", "3",
         "--compat-options", "filename-sanitization",
         "-f", "bestaudio/best",
-        "-x",
-        "--audio-format", YTDLP_AUDIO_FORMATS[format],
-        "--audio-quality", `${bitrate}k`,
-        "-o", path.join(jobDir, "%(title).100B.%(ext)s"),
-        ...(ppArgs ? ["--postprocessor-args", `ffmpeg:${ppArgs}`] : []),
-        ...ffmpegLocationArgs,
+        "-o", path.join(jobDir, "source.%(ext)s"),
         url
       ];
 
@@ -465,12 +501,38 @@ async function startServer() {
         timeout: 10 * 60 * 1000
       });
 
-      const files = await fsp.readdir(jobDir);
-      const outputFile = files.find((file) => file.toLowerCase().endsWith(`.${format}`)) || files[0];
-      if (!outputFile) {
-        throw new Error("No converted audio file was created.");
+      const sourceFiles = (await fsp.readdir(jobDir))
+        .filter((file) => !file.endsWith(".part") && !file.endsWith(".ytdl"));
+      const sourceFile = sourceFiles[0];
+      if (!sourceFile) {
+        throw new Error("No source audio file was downloaded.");
       }
-      const finalOutputPath = path.join(jobDir, outputFile);
+      const sourcePath = path.join(jobDir, sourceFile);
+      const finalOutputPath = path.join(jobDir, `${title || "audio"}.${format}`);
+      const duration = trimEnd > trimStart ? trimEnd - trimStart : 0;
+      const ffmpegArgs = [
+        "-hide_banner",
+        "-y",
+        ...(trimStart > 0 ? ["-ss", trimStart.toFixed(2)] : []),
+        "-i", sourcePath,
+        ...(duration > 0 ? ["-t", duration.toFixed(2)] : []),
+        "-vn",
+        "-ar", String(sampleRate),
+        ...(filters.length > 0 ? ["-af", filters.join(",")] : []),
+        ...getOutputCodecArgs(format, bitrate),
+        "-metadata", `title=${title}`,
+        ...(req.query.artist ? ["-metadata", `artist=${String(req.query.artist)}`] : []),
+        ...(req.query.album ? ["-metadata", `album=${String(req.query.album)}`] : []),
+        ...(req.query.genre ? ["-metadata", `genre=${String(req.query.genre)}`] : []),
+        ...(req.query.year ? ["-metadata", `date=${String(req.query.year)}`] : []),
+        finalOutputPath
+      ];
+
+      console.log(`Transcoding source audio with ffmpeg: ${format} ${bitrate}K`);
+      await runCommand(await getFfmpegExecutable(), ffmpegArgs, {
+        cwd: process.cwd(),
+        timeout: 10 * 60 * 1000
+      });
 
       const contentType = AUDIO_CONTENT_TYPES[format];
       const filename = `${title || "audio"}.${format}`;
