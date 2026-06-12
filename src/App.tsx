@@ -1,18 +1,22 @@
-import { useState, useEffect, useRef } from "react";
-import { 
-  Youtube, Sparkles, Music, Sliders, Play, Pause, AlertTriangle, 
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import {
+  Youtube, Sparkles, Music, Sliders, Play, Pause, AlertTriangle,
   ArrowRight, Compass, ExternalLink, Download, Clock, Library, ListTodo, User,
   Trash2, Plus, RefreshCw, Bot, CheckCircle2, FolderPlus, DownloadCloud, PlayCircle, History, X,
-  FileDown, FileUp, Search, Filter, RotateCcw, Layers
+  FileDown, FileUp, Search, Filter, RotateCcw, Layers,
+  Sun, Moon, GripVertical, Settings2, BookOpen, Save, FileMusic, ChevronDown, ChevronRight, Eye,
+  Archive, Zap, Users, Activity, ChevronUp, Keyboard
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
-import { VideoMetadata, ID3Tags, AudioSettings, QueueItem } from "./types";
+import { VideoMetadata, ID3Tags, AudioSettings, QueueItem, Chapter, SettingsPreset } from "./types";
 import AudioWaveform from "./components/AudioWaveform";
 import AudioSettingsPanel from "./components/AudioSettingsPanel";
 import ID3TagEditor from "./components/ID3TagEditor";
 import ProactiveSearch from "./components/ProactiveSearch";
 import ConsoleOutput from "./components/ConsoleOutput";
+import ToastContainer, { Toast } from "./components/Toast";
+import { createZip } from "./utils/zip";
 
 const AUDIO_FORMATS = ["mp3", "wav", "aac", "flac", "m4a", "ogg"] as const;
 const AUDIO_BITRATES = [128, 192, 256, 320] as const;
@@ -49,6 +53,8 @@ interface SonicWorkspace {
   downloadHistory?: Array<Omit<DownloadHistoryItem, "timestamp"> & { timestamp: string }>;
   recentUrls?: string[];
   filenameTemplate?: FilenameTemplate;
+  lightMode?: boolean;
+  savedPresets?: SettingsPreset[];
 }
 
 const WORKSPACE_STORAGE_KEY = "sonicmp3.workspace.v1";
@@ -131,7 +137,10 @@ const defaultSettings: AudioSettings = {
   trimStart: 0,
   trimEnd: 220,
   fadeIn: 1,
-  fadeOut: 2
+  fadeOut: 2,
+  embedThumbnail: false,
+  reverb: 0,
+  eqBands: [0, 0, 0, 0, 0]
 };
 
 const defaultID3: ID3Tags = {
@@ -171,7 +180,11 @@ function buildAudioEndpoint(url: string, format: string, bitrate: number, settin
     artist: tags?.artist || "",
     album: tags?.album || "",
     genre: tags?.genre || "",
-    year: tags?.year || ""
+    year: tags?.year || "",
+    embedThumbnail: String(settings.embedThumbnail),
+    thumbnailUrl: tags?.coverUrl || "",
+    reverb: String(settings.reverb ?? 0),
+    eqBands: (settings.eqBands ?? [0,0,0,0,0]).join(",")
   });
 
   return `/api/generate-audio?${params.toString()}`;
@@ -260,6 +273,74 @@ export default function App() {
   });
   const [isWorkspaceReady, setIsWorkspaceReady] = useState(false);
   const queueFileInputRef = useRef<HTMLInputElement | null>(null);
+  const localFileInputRef = useRef<HTMLInputElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Theme
+  const [lightMode, setLightMode] = useState(false);
+
+  // Drag-to-reorder
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+
+  // Per-item settings expansion
+  const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
+
+  // Chapters
+  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [isFetchingChapters, setIsFetchingChapters] = useState(false);
+  const [showChapters, setShowChapters] = useState(false);
+
+  // Preview before download
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+
+  // Audio time tracking (for waveform seek)
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+
+  // Settings presets
+  const [savedPresets, setSavedPresets] = useState<SettingsPreset[]>([]);
+  const [showPresetModal, setShowPresetModal] = useState(false);
+  const [presetName, setPresetName] = useState("");
+
+  // MusicBrainz loading
+  const [isMusicBrainzLoading, setIsMusicBrainzLoading] = useState(false);
+
+  // Local file conversion
+  const [localFileTab, setLocalFileTab] = useState(false);
+  const [localConvertFile, setLocalConvertFile] = useState<File | null>(null);
+  const [localConvertFormat, setLocalConvertFormat] = useState<typeof AUDIO_FORMATS[number]>("mp3");
+  const [localConvertBitrate, setLocalConvertBitrate] = useState<typeof AUDIO_BITRATES[number]>(320);
+  const [isConvertingLocal, setIsConvertingLocal] = useState(false);
+
+  // Toast notifications
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  // Collapsible UI panels
+  const [collapsedPanels, setCollapsedPanels] = useState<Set<string>>(new Set());
+
+  // Related videos & artist discography
+  const [relatedVideos, setRelatedVideos] = useState<Array<{title:string;channel:string;url:string}>>([]);
+  const [isLoadingRelated, setIsLoadingRelated] = useState(false);
+  const [showRelated, setShowRelated] = useState(false);
+  const [artistVideos, setArtistVideos] = useState<Array<{title:string;channel:string;url:string}>>([]);
+  const [isLoadingArtist, setIsLoadingArtist] = useState(false);
+  const [showArtistVideos, setShowArtistVideos] = useState(false);
+
+  // BPM detection
+  const [detectedBpm, setDetectedBpm] = useState<number | null>(null);
+
+  // Concurrent queue processing
+  const [concurrentLimit, setConcurrentLimit] = useState(1);
+
+  // Completed blobs for ZIP download
+  const completedBlobsRef = useRef<Map<string, { data: Uint8Array; filename: string }>>(new Map());
+
+  // SSE cleanup
+  const sseCleanupRef = useRef<(() => void) | null>(null);
+
+  // Keyboard shortcut hint visibility
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const queueStats = {
     pending: queue.filter(item => item.status === "pending").length,
     active: queue.filter(item => ["fetching_meta", "optimizing_tags", "converting"].includes(item.status)).length,
@@ -275,14 +356,13 @@ export default function App() {
       return `${item.title} ${item.artist} ${item.url}`.toLowerCase().includes(query);
     });
 
-  // Auto clean audio on component unmount
+  // Revoke blob URLs on cleanup
   useEffect(() => {
     return () => {
-      if (audioUrl) {
-        URL.revokeObjectURL(audioUrl);
-      }
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
-  }, [audioUrl]);
+  }, [audioUrl, previewUrl]);
 
   useEffect(() => {
     try {
@@ -294,6 +374,8 @@ export default function App() {
         if (workspace.queue) setQueue(workspace.queue.map(normalizeQueueItem));
         if (workspace.recentUrls) setRecentUrls(workspace.recentUrls.slice(0, 8));
         setFilenameTemplate(toFilenameTemplate(workspace.filenameTemplate));
+        if (typeof workspace.lightMode === "boolean") setLightMode(workspace.lightMode);
+        if (workspace.savedPresets) setSavedPresets(workspace.savedPresets);
         if (workspace.downloadHistory) {
           setDownloadHistory(workspace.downloadHistory.map(item => ({
             ...item,
@@ -317,6 +399,8 @@ export default function App() {
         queue,
         recentUrls,
         filenameTemplate,
+        lightMode,
+        savedPresets,
         downloadHistory: downloadHistory.map(item => ({
           ...item,
           timestamp: item.timestamp.toISOString()
@@ -351,6 +435,35 @@ export default function App() {
       window.clearInterval(interval);
     };
   }, []);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const inInput = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+
+      if (e.code === "Space" && !inInput) {
+        e.preventDefault();
+        if (audioRef.current) { audioRef.current.paused ? audioRef.current.play() : audioRef.current.pause(); }
+      }
+      if (e.code === "Escape") {
+        if (showPresetModal) setShowPresetModal(false);
+        if (showHistory) setShowHistory(false);
+        if (showShortcuts) setShowShortcuts(false);
+      }
+      if (e.code === "Enter" && e.ctrlKey && !e.shiftKey && videoMetadata && !isConverting) {
+        e.preventDefault();
+        handleConvertAndDownload();
+      }
+      if (e.code === "Enter" && e.ctrlKey && e.shiftKey && !isProcessingQueue && queue.filter(i => i.status === "pending").length > 0) {
+        e.preventDefault();
+        handleProcessQueue();
+      }
+      if (e.code === "Slash" && e.ctrlKey) { e.preventDefault(); setShowShortcuts(prev => !prev); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [showPresetModal, showHistory, showShortcuts, videoMetadata, isConverting, isProcessingQueue, queue]);
 
   // Handle URL loading and metadata fetching
   const handleLoadMetadata = async (urlToLoad?: string) => {
@@ -688,6 +801,218 @@ export default function App() {
     setLogs(prev => [...prev, `AUDIO_PROFILE: Applied ${profile.label} profile.`]);
   };
 
+  // Drag-to-reorder queue
+  const handleDragStart = (idx: number) => setDraggedIndex(idx);
+  const handleDragOver = (e: React.DragEvent, idx: number) => {
+    e.preventDefault();
+    if (draggedIndex === null || draggedIndex === idx) return;
+    const newQueue = [...queue];
+    const [moved] = newQueue.splice(draggedIndex, 1);
+    newQueue.splice(idx, 0, moved);
+    setQueue(newQueue);
+    setDraggedIndex(idx);
+  };
+  const handleDragEnd = () => setDraggedIndex(null);
+
+  // Per-item settings toggle
+  const handleToggleItemExpand = (id: string) =>
+    setExpandedItemId(prev => (prev === id ? null : id));
+
+  const handleUpdateItemSettings = (id: string, patch: NonNullable<QueueItem["itemSettings"]>) => {
+    setQueue(prev => prev.map(item =>
+      item.id === id ? { ...item, itemSettings: { ...item.itemSettings, ...patch } } : item
+    ));
+  };
+
+  // Fetch YouTube chapter markers
+  const handleFetchChapters = async () => {
+    if (!videoMetadata) return;
+    setIsFetchingChapters(true);
+    setChapters([]);
+    try {
+      const res = await fetch("/api/chapters", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: videoMetadata.url })
+      });
+      if (!res.ok) throw new Error("Chapter fetch failed");
+      const data = await res.json();
+      setChapters(data.chapters || []);
+      setShowChapters(true);
+      setLogs(prev => [...prev, `CHAPTERS: Found ${data.chapters?.length || 0} chapter markers.`]);
+    } catch (e: any) {
+      setLogs(prev => [...prev, `CHAPTERS: ${e.message || "No chapters found."}`]);
+    } finally {
+      setIsFetchingChapters(false);
+    }
+  };
+
+  // Add a single chapter as a trimmed queue item
+  const handleAddChapterToQueue = (chapter: Chapter) => {
+    if (!videoMetadata) return;
+    const id = Date.now().toString() + Math.random().toString(36).slice(2, 7);
+    const newItem: QueueItem = {
+      id,
+      url: videoMetadata.url,
+      title: chapter.title,
+      artist: tags.artist || videoMetadata.author,
+      status: "pending",
+      progress: 0,
+      bitrate: settings.bitrate,
+      format: settings.format,
+      thumbnailUrl: videoMetadata.thumbnailUrl,
+      itemSettings: { conversionMode: settings.conversionMode, equalizer: settings.equalizer }
+    };
+    setQueue(prev => [...prev, newItem]);
+    setLogs(prev => [...prev, `QUEUE: Added chapter "${chapter.title}" (${Math.floor(chapter.startTime)}s–${Math.floor(chapter.endTime)}s).`]);
+  };
+
+  // Quick 60-second preview download
+  const handlePreview = async () => {
+    if (!videoMetadata) return;
+    setIsLoadingPreview(true);
+    setPreviewUrl(null);
+    setLogs(prev => [...prev, "PREVIEW: Fetching 60s preview clip..."]);
+    try {
+      const params = new URLSearchParams({
+        url: videoMetadata.url,
+        format: "mp3",
+        bitrate: "128",
+        sampleRate: "44100",
+        trimStart: "0",
+        trimEnd: "60",
+        volumeBoost: "1",
+        fadeIn: "0",
+        fadeOut: "2",
+        conversionMode: "standard",
+        equalizer: "flat",
+        channelMode: "stereo",
+        stereoWidth: "1",
+        compression: "0",
+        limiterCeiling: "1",
+        normalizeLoudness: "false",
+        loudnessTarget: "-14",
+        noiseReduction: "0",
+        highPass: "20",
+        lowPass: "20000",
+        tempo: "1",
+        pitchShift: "0",
+        title: tags.title || videoMetadata.title,
+        preview: "true"
+      });
+      const res = await fetch(`/api/generate-audio?${params}`);
+      if (!res.ok) throw new Error("Preview fetch failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setPreviewUrl(url);
+      setLogs(prev => [...prev, "PREVIEW: Preview ready — click play to listen."]);
+    } catch (e: any) {
+      setLogs(prev => [...prev, `PREVIEW: Failed — ${e.message}`]);
+    } finally {
+      setIsLoadingPreview(false);
+    }
+  };
+
+  // MusicBrainz tag lookup
+  const handleMusicBrainzLookup = async () => {
+    if (!tags.title) return;
+    setIsMusicBrainzLoading(true);
+    try {
+      const res = await fetch("/api/musicbrainz", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: tags.title, artist: tags.artist })
+      });
+      if (!res.ok) throw new Error("MusicBrainz request failed");
+      const data = await res.json();
+      if (!data) {
+        setLogs(prev => [...prev, "MUSICBRAINZ: No match found — try refining the title."]);
+        return;
+      }
+      setTags(prev => ({
+        ...prev,
+        title: data.title || prev.title,
+        artist: data.artist || prev.artist,
+        album: data.album || prev.album,
+        year: data.year || prev.year,
+        genre: data.genre || prev.genre
+      }));
+      setLogs(prev => [...prev, `MUSICBRAINZ: Tags updated — "${data.title}" by ${data.artist} (${data.year}).`]);
+    } catch (e: any) {
+      setLogs(prev => [...prev, `MUSICBRAINZ: ${e.message}`]);
+    } finally {
+      setIsMusicBrainzLoading(false);
+    }
+  };
+
+  // Save current settings as a named preset
+  const handleSavePreset = () => {
+    const name = presetName.trim();
+    if (!name) return;
+    const newPreset: SettingsPreset = {
+      id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
+      name,
+      settings: { ...settings },
+      createdAt: new Date().toISOString()
+    };
+    setSavedPresets(prev => [newPreset, ...prev]);
+    setPresetName("");
+    setShowPresetModal(false);
+    setLogs(prev => [...prev, `PRESET: Saved settings preset "${name}".`]);
+  };
+
+  const handleApplySavedPreset = (preset: SettingsPreset) => {
+    setSettings(prev => ({
+      ...prev,
+      ...preset.settings,
+      trimStart: prev.trimStart,
+      trimEnd: prev.trimEnd
+    }));
+    setLogs(prev => [...prev, `PRESET: Applied preset "${preset.name}".`]);
+  };
+
+  const handleDeleteSavedPreset = (id: string) => {
+    setSavedPresets(prev => prev.filter(p => p.id !== id));
+  };
+
+  // Local file conversion
+  const handleLocalFileConvert = async () => {
+    if (!localConvertFile) return;
+    setIsConvertingLocal(true);
+    setLogs(prev => [...prev, `LOCAL: Converting "${localConvertFile.name}" → ${localConvertFormat.toUpperCase()} ${localConvertBitrate}kbps...`]);
+    try {
+      const ext = localConvertFile.name.split(".").pop()?.toLowerCase() || "mp3";
+      const baseName = localConvertFile.name.replace(/\.[^.]+$/, "");
+      const params = new URLSearchParams({
+        format: localConvertFormat,
+        bitrate: String(localConvertBitrate),
+        sampleRate: "48000",
+        name: baseName,
+        ext
+      });
+      const res = await fetch(`/api/convert-local?${params}`, {
+        method: "POST",
+        body: localConvertFile,
+        headers: { "Content-Type": localConvertFile.type || "application/octet-stream" }
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${baseName}.${localConvertFormat}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setLogs(prev => [...prev, `LOCAL: Converted "${localConvertFile.name}" — download dispatched.`]);
+    } catch (e: any) {
+      setLogs(prev => [...prev, `LOCAL ERROR: ${e.message}`]);
+    } finally {
+      setIsConvertingLocal(false);
+    }
+  };
+
   // 6. Bulk local Smart-Tuning cleanup for ID3 field structure
   const handleAutoTuneQueue = async () => {
     if (queue.length === 0) return;
@@ -724,33 +1049,45 @@ export default function App() {
     setLogs(prev => [...prev, "AI_TUNER: Core batch dataset cleaned and optimized with ID3 schema fields successfully."]);
   };
 
-  // 7. Sequential Batch Downloader & converter processing loop
+  // 7. Batch Downloader & converter processing loop
   const handleProcessQueue = async () => {
     if (isProcessingQueue) return;
     setIsProcessingQueue(true);
-    setLogs(prev => [...prev, "SYSTEM_BATCH: Commencing queue transcoder engine. Sequential mode: ON."]);
+    setLogs(prev => [...prev, `SYSTEM_BATCH: Commencing queue transcoder engine. Concurrency: ${concurrentLimit}.`]);
   };
 
-  // Manage sequential execution of the queue
+  // Manage execution of the queue (sequential or concurrent via SSE)
   useEffect(() => {
     if (!isProcessingQueue) return;
 
-    // Find the next item that should be processed (status 'pending')
-    const nextIndex = queue.findIndex(item => item.status === 'pending');
-    if (nextIndex === -1) {
+    const activeStatuses = ["fetching_meta", "optimizing_tags", "converting"] as const;
+    const activeCount = queue.filter(item => activeStatuses.includes(item.status as typeof activeStatuses[number])).length;
+
+    // Check if all done
+    const pendingCount = queue.filter(item => item.status === "pending").length;
+    if (pendingCount === 0 && activeCount === 0) {
       setIsProcessingQueue(false);
       setActiveQueueIndex(-1);
-      setLogs(prev => [...prev, "SYSTEM_BATCH: Complete conversion queue processed. All high fidelity downloads dispatched!"]);
+      const completed = queue.filter(item => item.status === "completed").length;
+      setLogs(prev => [...prev, `SYSTEM_BATCH: All ${completed} downloads dispatched!`]);
+      if (completed > 0) addToast(`Queue complete — ${completed} file${completed > 1 ? "s" : ""} downloaded!`, "success");
       return;
     }
+
+    // Don't start more than concurrentLimit at once
+    if (activeCount >= concurrentLimit) return;
+
+    // Find next pending item
+    const nextIndex = queue.findIndex(item => item.status === "pending");
+    if (nextIndex === -1) return;
 
     setActiveQueueIndex(nextIndex);
     const activeItem = queue[nextIndex];
 
     const runProcessItem = async () => {
-      // 1. Fetch exact metadata
-      setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, status: 'fetching_meta' } : item));
-      setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] FETCHING_META: Initiating stream crawl for url [${activeItem.url}]...`]);
+      // 1. Fetch metadata
+      setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, status: "fetching_meta" } : item));
+      setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] FETCHING_META: Resolving stream for ${activeItem.url}...`]);
 
       let finalTitle = activeItem.title;
       let finalArtist = activeItem.artist;
@@ -758,116 +1095,118 @@ export default function App() {
 
       try {
         const metaRes = await fetch("/api/metadata", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: activeItem.url })
         });
-        if (metaRes.ok) {
-          const metaData = await metaRes.json();
-          finalTitle = metaData.title;
-          finalArtist = metaData.author;
-          finalThumb = metaData.thumbnailUrl;
-        }
-      } catch (e) {
-        console.warn("Queue item metadata fetch warning, using existing fields:", e);
-      }
+        if (metaRes.ok) { const d = await metaRes.json(); finalTitle = d.title; finalArtist = d.author; finalThumb = d.thumbnailUrl; }
+      } catch { /* use existing */ }
 
       // 2. Optimize tags
-      setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { 
-        ...item, 
-        title: finalTitle, 
-        artist: finalArtist, 
-        thumbnailUrl: finalThumb,
-        status: 'optimizing_tags' 
-      } : item));
-      setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] OPTIMIZING_TAGS: Cleaning video formatting noise locally...`]);
-
+      setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, title: finalTitle, artist: finalArtist, thumbnailUrl: finalThumb, status: "optimizing_tags" } : item));
       try {
         const tagRes = await fetch("/api/optimize-tags", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title: finalTitle, author: finalArtist })
         });
-        if (tagRes.ok) {
-          const tagsOpt = await tagRes.json();
-          finalTitle = tagsOpt.title || finalTitle;
-          finalArtist = tagsOpt.artist || finalArtist;
+        if (tagRes.ok) { const t = await tagRes.json(); finalTitle = t.title || finalTitle; finalArtist = t.artist || finalArtist; }
+      } catch { /* use existing */ }
+
+      // 3. Start SSE job
+      setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, title: finalTitle, artist: finalArtist, status: "converting", progress: 0 } : item));
+      setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] TRANSCODING: "${finalTitle}" (${activeItem.bitrate}kbps ${activeItem.format.toUpperCase()})...`]);
+
+      try {
+        const mergedSettings = { ...settings, ...activeItem.itemSettings };
+        const jobBody = {
+          url: activeItem.url, format: activeItem.format, bitrate: activeItem.bitrate,
+          sampleRate: mergedSettings.sampleRate ?? settings.sampleRate,
+          trimStart: 0, trimEnd: 0,
+          volumeBoost: mergedSettings.volumeBoost ?? settings.volumeBoost,
+          stereoWidth: settings.stereoWidth, compression: settings.compression,
+          limiterCeiling: settings.limiterCeiling, normalizeLoudness: settings.normalizeLoudness,
+          loudnessTarget: settings.loudnessTarget, noiseReduction: settings.noiseReduction,
+          highPass: settings.highPass, lowPass: settings.lowPass,
+          tempo: settings.tempo, pitchShift: settings.pitchShift,
+          fadeIn: settings.fadeIn, fadeOut: settings.fadeOut,
+          conversionMode: mergedSettings.conversionMode ?? settings.conversionMode,
+          equalizer: mergedSettings.equalizer ?? settings.equalizer,
+          channelMode: settings.channelMode,
+          embedThumbnail: mergedSettings.embedThumbnail ?? settings.embedThumbnail,
+          thumbnailUrl: finalThumb || "",
+          reverb: settings.reverb, eqBands: (settings.eqBands ?? [0,0,0,0,0]).join(","),
+          title: finalTitle, artist: finalArtist,
+          durationSeconds: 220
+        };
+
+        const startRes = await fetch("/api/start-job", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(jobBody)
+        });
+        if (!startRes.ok) { const e = await startRes.json(); throw new Error(e.error || "Job start failed"); }
+        const { jobId } = await startRes.json();
+
+        // Subscribe to SSE progress
+        await new Promise<void>((resolve, reject) => {
+          const es = new EventSource(`/api/job-progress/${jobId}`);
+          es.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === "progress") {
+              setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, progress: data.progress } : item));
+            } else if (data.type === "done") { es.close(); resolve(); }
+            else { es.close(); reject(new Error(data.message)); }
+          };
+          es.onerror = () => { es.close(); reject(new Error("SSE connection lost")); };
+        });
+
+        // Download
+        const dlRes = await fetch(`/api/job-download/${jobId}`);
+        if (!dlRes.ok) throw new Error(await dlRes.text() || "Download failed");
+
+        const blob = await dlRes.blob();
+        const fname = buildDownloadFilename(filenameTemplate, {
+          title: finalTitle, artist: finalArtist,
+          bitrate: activeItem.bitrate, format: activeItem.format, mode: settings.conversionMode
+        });
+
+        // Save blob for ZIP
+        const blobData = new Uint8Array(await blob.arrayBuffer());
+        completedBlobsRef.current.set(activeItem.id, { data: blobData, filename: fname });
+
+        const localUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = localUrl; a.download = fname;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(localUrl);
+
+        setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, status: "completed", progress: 100 } : item));
+        setDownloadHistory(prev => [{
+          id: Date.now().toString(), title: finalTitle || "Unknown", artist: finalArtist || "Unknown",
+          url: activeItem.url, format: activeItem.format, bitrate: activeItem.bitrate, timestamp: new Date()
+        }, ...prev.slice(0, 49)]);
+        setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] COMPLETED: "${finalTitle}" downloaded.`]);
+
+      } catch (err: any) {
+        const retries = (activeItem.retryCount || 0) + 1;
+        if (retries <= 3) {
+          const delay = Math.pow(2, retries - 1) * 1500;
+          setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] RETRY ${retries}/3: "${err.message}" — retrying in ${delay/1000}s...`]);
+          setTimeout(() => {
+            setQueue(prev => prev.map((item, idx) => idx === nextIndex
+              ? { ...item, status: "pending", progress: 0, error: undefined, retryCount: retries }
+              : item));
+          }, delay);
+        } else {
+          setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, status: "failed", error: err.message } : item));
+          setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] FAILED: ${err.message}`]);
         }
-      } catch (e) {
-        console.warn("Queue tag optimization warning:", e);
       }
-
-      // Update item with finalized tags and switch status to 'converting'
-      setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { 
-        ...item, 
-        title: finalTitle, 
-        artist: finalArtist, 
-        status: 'converting',
-        progress: 0 
-      } : item));
-      setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] TRANSCODING: Converting track: "${finalTitle}" (${activeItem.bitrate}kbps ${activeItem.format.toUpperCase()})...`]);
-
-      // 3. Simulating transcoding progress
-      let p = 0;
-      const progressInterval = setInterval(async () => {
-        p += QUEUE_PROGRESS_INCREMENT;
-        setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, progress: p } : item));
-
-        if (p >= 100) {
-          clearInterval(progressInterval);
-          
-          // Trigger actual download
-          try {
-            const endpoint = buildAudioEndpoint(activeItem.url, activeItem.format, activeItem.bitrate, settings, {
-              title: finalTitle,
-              artist: finalArtist
-            });
-            const audioRes = await fetch(endpoint);
-            if (audioRes.ok) {
-              const blob = await audioRes.blob();
-              const localUrl = URL.createObjectURL(blob);
-
-              const downloadLink = document.createElement("a");
-              downloadLink.href = localUrl;
-              downloadLink.download = buildDownloadFilename(filenameTemplate, {
-                title: finalTitle,
-                artist: finalArtist,
-                bitrate: activeItem.bitrate,
-                format: activeItem.format,
-                mode: settings.conversionMode
-              });
-              document.body.appendChild(downloadLink);
-              downloadLink.click();
-              document.body.removeChild(downloadLink);
-
-              setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, status: 'completed' } : item));
-              setDownloadHistory(prev => [{
-                id: Date.now().toString(),
-                title: finalTitle || "Unknown",
-                artist: finalArtist || "Unknown",
-                url: activeItem.url,
-                format: activeItem.format,
-                bitrate: activeItem.bitrate,
-                timestamp: new Date()
-              }, ...prev.slice(0, 49)]);
-              setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] COMPLETED: Transcode & download finalized for song: "${finalTitle}".`]);
-            } else {
-              throw new Error("Transcode endpoint returned error.");
-            }
-          } catch (err: any) {
-            console.error("Queue download error:", err);
-            setQueue(prev => prev.map((item, idx) => idx === nextIndex ? { ...item, status: 'failed', error: err.message || "Download failed" } : item));
-            setLogs(prev => [...prev, `[Queue #${nextIndex + 1}] FAILED: Transcoded file discharge failed for: "${finalTitle}".`]);
-          }
-        }
-      }, QUEUE_PROGRESS_STEP_MS);
     };
 
     runProcessItem();
-  }, [isProcessingQueue, queue]);
+  }, [isProcessingQueue, queue, concurrentLimit]);
 
-  // Convert/Transcode pipeline action
-  const handleConvertAndDownload = () => {
+  // Convert/Transcode pipeline action — uses SSE job system for real progress
+  const handleConvertAndDownload = async () => {
     if (!videoMetadata) return;
 
     setIsConverting(true);
@@ -876,89 +1215,104 @@ export default function App() {
     setAudioUrl(null);
     setIsPlaying(false);
     setLogs([]);
+    setErrorMsg(null);
 
-    const logMessages = [
+    setLogs(prev => [...prev,
       "CORE_DAEMON: Initializing high-speed audio transcoder daemon...",
-      `NET_RESOLVER: Pinging secure audio stream channel for video ID: ${youtubeUrl}...`,
-      "STREAM_CRAWLER: Hooked into high-fidelity adaptive streaming packets...",
-      `MODE_ROUTER: Conversion mode resolved to [${settings.conversionMode.replace(/_/g, " ").toUpperCase()}]...`,
-      `DSP_FILTER: Aligning active equalizers under preset [${settings.equalizer.toUpperCase()}] profile...`,
-      `DYNAMIC_GAIN: Amplification buffer injected successfully. Gain coefficient updated -> ${(settings.volumeBoost * 100).toFixed(0)}%`,
-      `MIX_BUS: Stereo width ${(settings.stereoWidth * 100).toFixed(0)}%, compression ${settings.compression}%, limiter ceiling ${(settings.limiterCeiling * 100).toFixed(0)}%...`,
-      `RESTORE_CHAIN: Noise reduction ${settings.noiseReduction}%, high-pass ${settings.highPass}Hz, low-pass ${settings.lowPass}Hz...`,
-      `TIME_PITCH: Tempo ${(settings.tempo * 100).toFixed(0)}%, pitch shift ${settings.pitchShift > 0 ? "+" : ""}${settings.pitchShift} semitone(s), ${settings.channelMode.toUpperCase()} output...`,
-      `LOUDNESS: ${settings.normalizeLoudness ? `Normalizing to ${settings.loudnessTarget} LUFS` : "Preserving source loudness"}...`,
-      `TRANSCODER_TRIM: Registering start cutting position (${settings.trimStart}s) to end point (${settings.trimEnd}s)...`,
-      `SAMPLER_ENGINE: Stereophonic distribution synced. Audio sample-rate configured to ${settings.sampleRate} Hz...`,
-      `PACKAGER: Building lossless high-bitrate frame blocks [${settings.bitrate} kbps] for ${settings.format.toUpperCase()} Container...`,
-      `ID3_METADATA: Encoding ID3 tags. Title: [${tags.title}], Artist: [${tags.artist}], Genre: [${tags.genre}], Year: [${tags.year}]...`,
-      "TRANSCODER_SUCCESS: Conversion successfully finalized. Bundled audio stream exported to browser cache!"
-    ];
-    const totalSteps = logMessages.length;
-    let currentStep = 0;
+      `MODE_ROUTER: Conversion mode [${settings.conversionMode.replace(/_/g, " ").toUpperCase()}], EQ [${settings.equalizer.toUpperCase()}]...`,
+      `DSP: Stereo ${(settings.stereoWidth * 100).toFixed(0)}%, compression ${settings.compression}%, limiter ${(settings.limiterCeiling * 100).toFixed(0)}%...`,
+      `PACKAGER: ${settings.bitrate}kbps ${settings.format.toUpperCase()} · ${settings.sampleRate}Hz · ${settings.channelMode}...`
+    ]);
 
-    const interval = setInterval(async () => {
-      currentStep++;
-      const currentProgress = Math.min(Math.floor((currentStep / totalSteps) * 100), 100);
-      setProgress(currentProgress);
+    try {
+      const jobBody = {
+        url: videoMetadata.url, format: settings.format, bitrate: settings.bitrate,
+        sampleRate: settings.sampleRate, trimStart: settings.trimStart, trimEnd: settings.trimEnd,
+        volumeBoost: settings.volumeBoost, stereoWidth: settings.stereoWidth,
+        compression: settings.compression, limiterCeiling: settings.limiterCeiling,
+        normalizeLoudness: settings.normalizeLoudness, loudnessTarget: settings.loudnessTarget,
+        noiseReduction: settings.noiseReduction, highPass: settings.highPass, lowPass: settings.lowPass,
+        tempo: settings.tempo, pitchShift: settings.pitchShift,
+        fadeIn: settings.fadeIn, fadeOut: settings.fadeOut,
+        conversionMode: settings.conversionMode, equalizer: settings.equalizer,
+        channelMode: settings.channelMode, embedThumbnail: settings.embedThumbnail,
+        thumbnailUrl: tags.coverUrl || "", reverb: settings.reverb,
+        eqBands: (settings.eqBands ?? [0,0,0,0,0]).join(","),
+        title: tags.title || videoMetadata.title, artist: tags.artist || "",
+        album: tags.album || "", genre: tags.genre || "", year: tags.year || "",
+        durationSeconds: videoMetadata.durationSeconds || 220
+      };
 
-      const currentLog = logMessages[currentStep - 1];
-      if (currentLog) {
-        setLogs(prev => [...prev, currentLog]);
-      }
+      const startRes = await fetch("/api/start-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(jobBody)
+      });
+      if (!startRes.ok) { const e = await startRes.json(); throw new Error(e.error || "Failed to start job"); }
+      const { jobId } = await startRes.json();
 
-      if (currentStep >= totalSteps) {
-        clearInterval(interval);
-        
-        // Formulate backend request to download active custom synth stream
-        const endpoint = buildAudioEndpoint(videoMetadata?.url || youtubeUrl, settings.format, settings.bitrate, settings, tags);
-        
-        try {
-          // Prefetch the audio to create a local Blob for on-screen playback preview
-          const audioResponse = await fetch(endpoint);
-          if (audioResponse.ok) {
-            const blob = await audioResponse.blob();
-            const localUrl = URL.createObjectURL(blob);
-            setAudioUrl(localUrl);
-            // Save to download history
-            setDownloadHistory(prev => [{
-              id: Date.now().toString(),
-              title: tags.title || videoMetadata?.title || "Unknown",
-              artist: tags.artist || videoMetadata?.author || "Unknown",
-              url: videoMetadata?.url || youtubeUrl,
-              format: settings.format,
-              bitrate: settings.bitrate,
-              timestamp: new Date()
-            }, ...prev.slice(0, 49)]);
+      setLogs(prev => [...prev, `NET_RESOLVER: Job ${jobId.slice(0, 8)} started — streaming yt-dlp + ffmpeg progress...`]);
 
-            // Programmatically download the file instantly!
-            const downloadLink = document.createElement("a");
-            downloadLink.href = localUrl;
-            downloadLink.download = buildDownloadFilename(filenameTemplate, {
-              title: tags.title || videoMetadata?.title || "Audio",
-              artist: tags.artist || videoMetadata?.author,
-              bitrate: settings.bitrate,
-              format: settings.format,
-              mode: settings.conversionMode
-            });
-            document.body.appendChild(downloadLink);
-            downloadLink.click();
-            document.body.removeChild(downloadLink);
-            
-            setLogs(prev => [...prev, "SYSTEM: Dispatching custom media bundle download directly to browser destination directory."]);
+      await new Promise<void>((resolve, reject) => {
+        const es = new EventSource(`/api/job-progress/${jobId}`);
+        sseCleanupRef.current = () => es.close();
+        es.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          if (data.type === "progress") {
+            setProgress(data.progress);
+            if (data.progress === 5) setLogs(prev => [...prev, "STREAM_CRAWLER: yt-dlp downloading source audio stream..."]);
+            if (data.progress === 30) setLogs(prev => [...prev, "TRANSCODER: ffmpeg encoding with DSP filter chain..."]);
+          } else if (data.type === "done") {
+            setProgress(100);
+            es.close();
+            resolve();
           } else {
-            throw new Error("Local audio caching failed.");
+            es.close();
+            reject(new Error(data.message || "Conversion failed"));
           }
-        } catch (err) {
-          console.error("Download fetch error:", err);
-          // Fallback to active URL trigger direction
-          window.open(endpoint, "_blank");
-        }
+        };
+        es.onerror = () => { es.close(); reject(new Error("Connection lost during conversion")); };
+      });
 
-        setIsConverting(false);
-        setIsCompleted(true);
-      }
-    }, CONVERSION_STEP_MS);
+      setLogs(prev => [...prev, "PACKAGER: Downloading converted audio to browser..."]);
+      const dlRes = await fetch(`/api/job-download/${jobId}`);
+      if (!dlRes.ok) throw new Error(await dlRes.text() || "Download failed");
+
+      const blob = await dlRes.blob();
+      const localUrl = URL.createObjectURL(blob);
+      setAudioUrl(localUrl);
+
+      setDownloadHistory(prev => [{
+        id: Date.now().toString(),
+        title: tags.title || videoMetadata?.title || "Unknown",
+        artist: tags.artist || videoMetadata?.author || "Unknown",
+        url: videoMetadata?.url || youtubeUrl,
+        format: settings.format, bitrate: settings.bitrate, timestamp: new Date()
+      }, ...prev.slice(0, 49)]);
+
+      const fname = buildDownloadFilename(filenameTemplate, {
+        title: tags.title || videoMetadata?.title || "Audio",
+        artist: tags.artist || videoMetadata?.author,
+        bitrate: settings.bitrate, format: settings.format, mode: settings.conversionMode
+      });
+      const a = document.createElement("a");
+      a.href = localUrl; a.download = fname;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+
+      setLogs(prev => [...prev, "SYSTEM: Download dispatched to browser destination."]);
+      setIsCompleted(true);
+      addToast(`"${tags.title || videoMetadata.title}" converted!`, "success");
+
+    } catch (err: any) {
+      console.error("Conversion error:", err);
+      const msg = err.message || "Conversion failed";
+      setErrorMsg(msg);
+      setLogs(prev => [...prev, `ERROR: ${msg}`]);
+      addToast(msg, "error");
+    } finally {
+      setIsConverting(false);
+      sseCleanupRef.current = null;
+    }
   };
 
   // Custom audio playback preview controller
@@ -982,6 +1336,114 @@ export default function App() {
     }
   };
 
+  // Toast helpers
+  const addToast = useCallback((message: string, type: Toast["type"] = "info") => {
+    const id = Date.now().toString() + Math.random().toString(36).slice(2, 5);
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4500);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => setToasts(prev => prev.filter(t => t.id !== id)), []);
+
+  // Collapsible panel toggle
+  const togglePanel = (id: string) => {
+    setCollapsedPanels(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  };
+
+  // Fetch related videos
+  const handleFetchRelated = async () => {
+    if (!videoMetadata) return;
+    setIsLoadingRelated(true);
+    try {
+      const res = await fetch("/api/related", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: videoMetadata.url })
+      });
+      if (res.ok) { setRelatedVideos(await res.json()); setShowRelated(true); }
+    } catch { /* silent */ }
+    finally { setIsLoadingRelated(false); }
+  };
+
+  // Fetch artist discography via search
+  const handleFetchArtistDiscography = async () => {
+    if (!tags.artist && !videoMetadata?.author) return;
+    const artist = tags.artist || videoMetadata?.author || "";
+    setIsLoadingArtist(true);
+    setArtistVideos([]);
+    try {
+      const res = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: artist + " official" })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setArtistVideos(data.slice(0, 6));
+        setShowArtistVideos(true);
+      }
+    } catch { /* silent */ }
+    finally { setIsLoadingArtist(false); }
+  };
+
+  // BPM detection via Web Audio API
+  const handleDetectBpm = async () => {
+    const src = previewUrl || audioUrl;
+    if (!src) { addToast("Load a preview first to detect BPM", "info"); return; }
+    try {
+      const ctx = new AudioContext();
+      const arrBuf = await (await fetch(src)).arrayBuffer();
+      const audioBuf = await ctx.decodeAudioData(arrBuf);
+      const data = audioBuf.getChannelData(0);
+      const sampleRate = audioBuf.sampleRate;
+      const windowSize = Math.round(sampleRate * 0.02);
+      const energies: number[] = [];
+      for (let i = 0; i < data.length - windowSize; i += windowSize) {
+        let e = 0;
+        for (let j = i; j < i + windowSize; j++) e += data[j] * data[j];
+        energies.push(e);
+      }
+      const mean = energies.reduce((a, b) => a + b, 0) / energies.length;
+      let peaks = 0;
+      let lastPeak = -10;
+      for (let i = 1; i < energies.length - 1; i++) {
+        if (energies[i] > mean * 1.5 && energies[i] > energies[i-1] && energies[i] > energies[i+1] && (i - lastPeak) > 15) {
+          peaks++;
+          lastPeak = i;
+        }
+      }
+      const durationSecs = audioBuf.duration;
+      const bpm = Math.round((peaks / durationSecs) * 60);
+      const clamped = Math.min(220, Math.max(40, bpm));
+      setDetectedBpm(clamped);
+      addToast(`Detected BPM: ~${clamped}`, "success");
+      ctx.close();
+    } catch (e: any) {
+      addToast("BPM detection failed: " + (e.message || "unknown error"), "error");
+    }
+  };
+
+  // Download all completed queue items as a ZIP
+  const handleDownloadZip = async () => {
+    const entries = [...completedBlobsRef.current.values()];
+    if (entries.length === 0) { addToast("No completed downloads to ZIP yet.", "info"); return; }
+    addToast(`Packing ${entries.length} file(s) into ZIP…`, "info");
+    try {
+      const zip = await createZip(entries.map(e => ({ name: e.filename, data: e.data })));
+      const url = URL.createObjectURL(zip);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `sonicmp3-batch-${new Date().toISOString().slice(0, 10)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      addToast(`ZIP downloaded (${entries.length} tracks)`, "success");
+    } catch (e: any) {
+      addToast("ZIP creation failed: " + e.message, "error");
+    }
+  };
+
   // Reset converter state
   const handleReset = () => {
     setYoutubeUrl("");
@@ -992,7 +1454,12 @@ export default function App() {
     setProgress(0);
     setLogs([]);
     setAudioUrl(null);
+    setPreviewUrl(null);
     setIsPlaying(false);
+    setChapters([]);
+    setShowChapters(false);
+    setAudioCurrentTime(0);
+    setAudioDuration(0);
     if (audioPreviewElement) {
       audioPreviewElement.pause();
       setAudioPreviewElement(null);
@@ -1000,7 +1467,7 @@ export default function App() {
   };
 
   return (
-    <div id="app_root" className="min-h-screen bg-[#080808] text-[#f0f0f0] flex flex-col antialiased selection:bg-[#ff4e00] selection:text-white relative overflow-hidden">
+    <div id="app_root" className={`min-h-screen bg-[#080808] text-[#f0f0f0] flex flex-col antialiased selection:bg-[#ff4e00] selection:text-white relative overflow-hidden${lightMode ? " light-mode" : ""}`}>
       {/* Animated background orbs */}
       <motion.div
         animate={{ x: [0, 40, -20, 0], y: [0, -30, 20, 0] }}
@@ -1187,6 +1654,15 @@ export default function App() {
             <span className="px-2.5 py-1 bg-[#ff4e00]/10 rounded-lg text-[10.5px] text-[#ff8c00] font-bold border border-[#ff4e00]/20">
               {backendHealth.formats.length || AUDIO_FORMATS.length} FORMATS
             </span>
+            <button
+              type="button"
+              onClick={() => setLightMode(m => !m)}
+              title={lightMode ? "Switch to dark mode" : "Switch to light mode"}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10.5px] font-bold text-zinc-300 hover:text-white transition-all cursor-pointer"
+            >
+              {lightMode ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
+              {lightMode ? "Dark" : "Light"}
+            </button>
             <input
               ref={queueFileInputRef}
               type="file"
@@ -1246,33 +1722,122 @@ export default function App() {
               <div className="flex bg-[#080808] p-1 rounded-xl border border-white/10 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setActiveTab('single')}
+                  onClick={() => { setActiveTab('single'); setLocalFileTab(false); }}
                   className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
-                    activeTab === 'single'
+                    activeTab === 'single' && !localFileTab
                       ? "bg-[#ff4e00] text-white shadow-md"
                       : "text-zinc-500 hover:text-white"
                   }`}
                 >
                   <Youtube className="w-3.5 h-3.5" />
-                  Single Stream
+                  Single
                 </button>
                 <button
                   type="button"
-                  onClick={() => setActiveTab('playlist')}
+                  onClick={() => { setActiveTab('playlist'); setLocalFileTab(false); }}
                   className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
-                    activeTab === 'playlist'
+                    activeTab === 'playlist' && !localFileTab
                       ? "bg-[#ff4e00] text-white shadow-md"
                       : "text-zinc-500 hover:text-white"
                   }`}
                 >
                   <ListTodo className="w-3.5 h-3.5" />
-                  Full Playlist
+                  Playlist
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLocalFileTab(true)}
+                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                    localFileTab
+                      ? "bg-[#ff4e00] text-white shadow-md"
+                      : "text-zinc-500 hover:text-white"
+                  }`}
+                >
+                  <FileMusic className="w-3.5 h-3.5" />
+                  Local File
                 </button>
               </div>
             </div>
 
             <AnimatePresence mode="wait">
-              {activeTab === 'single' ? (
+              {localFileTab ? (
+                <motion.div
+                  key="local_tab"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="flex flex-col gap-4"
+                >
+                  <input
+                    ref={localFileInputRef}
+                    type="file"
+                    accept="audio/*,.mp3,.wav,.flac,.aac,.m4a,.ogg,.opus,.wma"
+                    className="hidden"
+                    onChange={e => setLocalConvertFile(e.target.files?.[0] || null)}
+                  />
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => localFileInputRef.current?.click()}
+                    onKeyDown={e => e.key === "Enter" && localFileInputRef.current?.click()}
+                    onDragOver={e => e.preventDefault()}
+                    onDrop={e => { e.preventDefault(); setLocalConvertFile(e.dataTransfer.files?.[0] || null); }}
+                    className="border-2 border-dashed border-white/10 hover:border-[#ff4e00]/50 rounded-xl p-8 text-center cursor-pointer transition-colors flex flex-col items-center gap-3"
+                  >
+                    <FileMusic className="w-10 h-10 text-zinc-600" />
+                    {localConvertFile ? (
+                      <div>
+                        <p className="text-sm font-bold text-white">{localConvertFile.name}</p>
+                        <p className="text-xs text-zinc-500">{(localConvertFile.size / 1024 / 1024).toFixed(1)} MB</p>
+                      </div>
+                    ) : (
+                      <div>
+                        <p className="text-sm font-semibold text-zinc-300">Drop an audio file here or click to browse</p>
+                        <p className="text-xs text-zinc-500 mt-1">MP3, WAV, FLAC, AAC, M4A, OGG, OPUS, WMA</p>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-3 items-end">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-zinc-500 uppercase font-mono font-bold">Output Format</span>
+                      <select
+                        value={localConvertFormat}
+                        onChange={e => setLocalConvertFormat(toAudioFormat(e.target.value))}
+                        title="Output format"
+                        className="bg-zinc-950 border border-white/10 text-zinc-300 rounded-lg px-2 py-1.5 text-xs font-mono focus:outline-hidden cursor-pointer focus:border-[#ff4e00] uppercase"
+                      >
+                        {AUDIO_FORMATS.map(f => <option key={f} value={f}>{f.toUpperCase()}</option>)}
+                      </select>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-zinc-500 uppercase font-mono font-bold">Bitrate</span>
+                      <select
+                        value={localConvertBitrate}
+                        onChange={e => setLocalConvertBitrate(toAudioBitrate(e.target.value))}
+                        title="Output bitrate"
+                        className="bg-zinc-950 border border-white/10 text-zinc-300 rounded-lg px-2 py-1.5 text-xs font-mono focus:outline-hidden cursor-pointer focus:border-[#ff4e00]"
+                      >
+                        <option value={128}>128 kbps</option>
+                        <option value={192}>192 kbps</option>
+                        <option value={256}>256 kbps</option>
+                        <option value={320}>320 kbps HD</option>
+                      </select>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleLocalFileConvert}
+                      disabled={!localConvertFile || isConvertingLocal}
+                      className="px-6 py-2 bg-white hover:bg-[#ff4e00] text-black hover:text-white font-extrabold text-xs rounded-xl transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2 uppercase"
+                    >
+                      {isConvertingLocal ? (
+                        <><span className="w-3.5 h-3.5 border-2 border-black/30 border-t-black rounded-full animate-spin" />Converting...</>
+                      ) : (
+                        <><Download className="w-3.5 h-3.5" />Convert &amp; Download</>
+                      )}
+                    </button>
+                  </div>
+                </motion.div>
+              ) : activeTab === 'single' ? (
                 <motion.div
                   key="single_tab"
                   initial={{ opacity: 0, y: 10 }}
@@ -1365,18 +1930,104 @@ export default function App() {
                           <p className="text-[11px] text-zinc-500 mt-2 font-mono flex items-center gap-1">
                             <Library className="w-3 h-3 text-zinc-600" /> Lossless audio tracks indexed
                           </p>
+                          {detectedBpm && (
+                            <p className="text-[11px] text-amber-400 font-mono flex items-center gap-1 mt-0.5">
+                              <Activity className="w-3 h-3" /> {detectedBpm} BPM detected
+                            </p>
+                          )}
                         </div>
                       </div>
 
-                      {/* Add directly to batch queue trigger */}
-                      <button
-                        type="button"
-                        onClick={handleAddToQueue}
-                        className="w-full py-3 bg-[#080808] hover:bg-[#ff4e00]/10 border border-white/5 hover:border-[#ff4e00]/30 text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-2 transform active:scale-[0.98] cursor-pointer"
-                      >
-                        <FolderPlus className="w-4 h-4 text-[#ff4e00]" />
-                        Append to Transcoding Queue
-                      </button>
+                      {/* BPM / Related / Artist row */}
+                      <div className="flex gap-2">
+                        <button type="button" onClick={handleDetectBpm}
+                          className="flex-1 py-2 bg-[#0c0c0c] border border-white/5 hover:border-amber-500/30 text-zinc-400 hover:text-amber-400 font-bold text-[10px] uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer">
+                          <Activity className="w-3.5 h-3.5" /> BPM
+                        </button>
+                        <button type="button" onClick={handleFetchRelated} disabled={isLoadingRelated}
+                          className="flex-1 py-2 bg-[#0c0c0c] border border-white/5 hover:border-sky-500/30 text-zinc-400 hover:text-sky-400 font-bold text-[10px] uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50">
+                          {isLoadingRelated ? <span className="w-3 h-3 border border-sky-400/40 border-t-sky-400 rounded-full animate-spin" /> : <><Activity className="w-3.5 h-3.5" />Related</>}
+                        </button>
+                        <button type="button" onClick={handleFetchArtistDiscography} disabled={isLoadingArtist}
+                          className="flex-1 py-2 bg-[#0c0c0c] border border-white/5 hover:border-violet-500/30 text-zinc-400 hover:text-violet-400 font-bold text-[10px] uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50">
+                          {isLoadingArtist ? <span className="w-3 h-3 border border-violet-400/40 border-t-violet-400 rounded-full animate-spin" /> : <><Users className="w-3.5 h-3.5" />Artist</>}
+                        </button>
+                      </div>
+
+                      {/* Action row: preview + chapters + queue */}
+                      <div className="flex flex-col gap-2">
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={handlePreview}
+                            disabled={isLoadingPreview}
+                            className="flex-1 py-2.5 bg-[#080808] hover:bg-purple-500/10 border border-white/5 hover:border-purple-500/30 text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                          >
+                            {isLoadingPreview
+                              ? <><span className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />Fetching Preview...</>
+                              : <><Eye className="w-3.5 h-3.5 text-purple-400" />Preview 60s</>}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleFetchChapters}
+                            disabled={isFetchingChapters}
+                            className="flex-1 py-2.5 bg-[#080808] hover:bg-cyan-500/10 border border-white/5 hover:border-cyan-500/30 text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                          >
+                            {isFetchingChapters
+                              ? <><span className="w-3.5 h-3.5 border-2 border-white/20 border-t-cyan-400 rounded-full animate-spin" />Fetching...</>
+                              : <><BookOpen className="w-3.5 h-3.5 text-cyan-400" />Chapters ({chapters.length})</>}
+                          </button>
+                        </div>
+
+                        {previewUrl && (
+                          <div className="flex flex-col gap-1 p-3 bg-purple-950/20 border border-purple-500/20 rounded-xl">
+                            <span className="text-[10px] font-bold text-purple-400 uppercase tracking-wider font-mono">60s Preview</span>
+                            <audio
+                              src={previewUrl}
+                              controls
+                              className="w-full h-8"
+                              style={{ accentColor: "#a855f7", colorScheme: "dark" }}
+                            />
+                          </div>
+                        )}
+
+                        {showChapters && chapters.length > 0 && (
+                          <div className="bg-[#080808] border border-white/5 rounded-xl overflow-hidden">
+                            <div className="flex items-center justify-between px-3 py-2 border-b border-white/5 bg-white/5">
+                              <span className="text-[10px] font-bold text-cyan-400 uppercase tracking-wider font-mono flex items-center gap-1.5">
+                                <BookOpen className="w-3 h-3" />{chapters.length} Chapters
+                              </span>
+                              <button type="button" onClick={() => setShowChapters(false)} className="text-zinc-600 hover:text-zinc-300 cursor-pointer transition-colors text-[10px]">Hide</button>
+                            </div>
+                            <div className="max-h-40 overflow-y-auto divide-y divide-white/5">
+                              {chapters.map((ch, i) => (
+                                <div key={i} className="flex items-center justify-between px-3 py-2 hover:bg-white/5 transition-colors">
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-xs font-semibold text-zinc-200 truncate">{ch.title}</p>
+                                    <p className="text-[10px] text-zinc-500 font-mono">{Math.floor(ch.startTime / 60)}:{String(Math.floor(ch.startTime % 60)).padStart(2,"0")} – {Math.floor(ch.endTime / 60)}:{String(Math.floor(ch.endTime % 60)).padStart(2,"0")}</p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleAddChapterToQueue(ch)}
+                                    className="ml-2 px-2 py-1 text-[9.5px] font-bold bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500/20 transition-colors cursor-pointer uppercase shrink-0"
+                                  >
+                                    + Queue
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={handleAddToQueue}
+                          className="w-full py-3 bg-[#080808] hover:bg-[#ff4e00]/10 border border-white/5 hover:border-[#ff4e00]/30 text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-2 transform active:scale-[0.98] cursor-pointer"
+                        >
+                          <FolderPlus className="w-4 h-4 text-[#ff4e00]" />
+                          Append to Transcoding Queue
+                        </button>
+                      </div>
                     </motion.div>
                   )}
                 </motion.div>
@@ -1736,7 +2387,13 @@ export default function App() {
                         initial={{ opacity: 0, x: -15 }}
                         animate={{ opacity: 1, x: 0 }}
                         exit={{ opacity: 0, x: 15 }}
-                        className={`flex flex-col sm:flex-row items-start sm:items-center justify-between p-3.5 border rounded-xl transition-all gap-3 ${
+                        draggable={!isProcessingQueue && item.status === "pending"}
+                        onDragStart={() => handleDragStart(idx)}
+                        onDragOver={e => handleDragOver(e, idx)}
+                        onDragEnd={handleDragEnd}
+                        className={`flex flex-col border rounded-xl transition-all gap-0 ${
+                          draggedIndex === idx ? "opacity-50 scale-[0.98]" : ""
+                        } ${
                           isActive
                             ? "bg-[#ff4e00]/5 border-[#ff4e00]/30 shadow-[0_0_15px_rgba(255,78,0,0.1)]"
                             : item.status === 'completed'
@@ -1746,8 +2403,13 @@ export default function App() {
                             : "bg-[#080808] border-white/5 hover:border-white/10"
                         }`}
                       >
-                        {/* Title & Artist & Thumb */}
+                        {/* Main row */}
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-3.5 gap-3">
+                        {/* Drag handle + Title & Artist & Thumb */}
                         <div className="flex items-center gap-3 min-w-0 flex-1">
+                          {item.status === "pending" && !isProcessingQueue && (
+                            <GripVertical className="w-4 h-4 text-zinc-700 shrink-0 cursor-grab active:cursor-grabbing" />
+                          )}
                           <div className="relative w-12 h-12 bg-zinc-900 rounded-lg overflow-hidden border border-white/10 shrink-0">
                             <img src={item.thumbnailUrl} alt="" className="w-full h-full object-cover" />
                             {isActive && (
@@ -1845,7 +2507,17 @@ export default function App() {
                             )}
                           </div>
 
-                          {/* Delete/Trash Trigger Action */}
+                          {/* Per-item settings expand + delete */}
+                          {item.status === "pending" && !isProcessingQueue && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleItemExpand(item.id)}
+                              title="Per-item DSP settings"
+                              className="p-1.5 text-zinc-500 hover:text-[#ff8c00] transition-colors cursor-pointer rounded-lg hover:bg-white/5"
+                            >
+                              <Settings2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           {(!isActive && item.status !== 'fetching_meta' && item.status !== 'optimizing_tags' && item.status !== 'converting') ? (
                             <button
                               type="button"
@@ -1861,6 +2533,67 @@ export default function App() {
                             </div>
                           )}
                         </div>
+                        </div>{/* end main row */}
+
+                        {/* Per-item expandable settings */}
+                        <AnimatePresence>
+                          {expandedItemId === item.id && (
+                            <motion.div
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: "auto", opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.18 }}
+                              className="overflow-hidden border-t border-white/5"
+                            >
+                              <div className="p-3 flex flex-wrap gap-3 items-center">
+                                <div className="flex flex-col gap-1">
+                                  <span className="text-[9px] uppercase font-mono text-zinc-600">EQ</span>
+                                  <select
+                                    value={item.itemSettings?.equalizer ?? settings.equalizer}
+                                    onChange={e => handleUpdateItemSettings(item.id, { equalizer: e.target.value as AudioSettings["equalizer"] })}
+                                    title="Per-item equalizer"
+                                    className="bg-zinc-950 border border-white/10 text-zinc-300 rounded-lg px-2 py-1 text-[9.5px] font-mono focus:outline-hidden cursor-pointer focus:border-[#ff4e00]"
+                                  >
+                                    {["flat","bass","vocal","treble","instrumental","lofi"].map(eq => (
+                                      <option key={eq} value={eq}>{eq}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                  <span className="text-[9px] uppercase font-mono text-zinc-600">Mode</span>
+                                  <select
+                                    value={item.itemSettings?.conversionMode ?? settings.conversionMode}
+                                    onChange={e => handleUpdateItemSettings(item.id, { conversionMode: e.target.value as AudioSettings["conversionMode"] })}
+                                    title="Per-item conversion mode"
+                                    className="bg-zinc-950 border border-white/10 text-zinc-300 rounded-lg px-2 py-1 text-[9.5px] font-mono focus:outline-hidden cursor-pointer focus:border-[#ff4e00]"
+                                  >
+                                    {["standard","audio_mix","mastering","vocal_master","club_master"].map(m => (
+                                      <option key={m} value={m}>{m.replace(/_/g," ")}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                  <span className="text-[9px] uppercase font-mono text-zinc-600">Gain</span>
+                                  <input
+                                    type="range" min="1" max="2" step="0.05"
+                                    value={item.itemSettings?.volumeBoost ?? 1}
+                                    onChange={e => handleUpdateItemSettings(item.id, { volumeBoost: parseFloat(e.target.value) })}
+                                    className="w-20 h-1 accent-[#ff4e00] cursor-pointer"
+                                  />
+                                </div>
+                                <label className="flex items-center gap-1.5 text-[9.5px] text-zinc-400 font-mono cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={item.itemSettings?.embedThumbnail ?? settings.embedThumbnail}
+                                    onChange={e => handleUpdateItemSettings(item.id, { embedThumbnail: e.target.checked })}
+                                    className="accent-[#ff4e00]"
+                                  />
+                                  Embed Art
+                                </label>
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
                       </motion.div>
                     );
                   })}
@@ -1872,6 +2605,30 @@ export default function App() {
                 )}
               </div>
 
+              {/* Concurrent mode + ZIP */}
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 bg-[#0c0c0c] border border-white/5 rounded-xl px-3 py-2">
+                  <Zap className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider">Threads</span>
+                  {[1,2,3].map(n => (
+                    <button key={n} type="button" onClick={() => setConcurrentLimit(n)}
+                      className={`w-6 h-6 rounded text-[10px] font-bold transition-all cursor-pointer ${concurrentLimit === n ? "bg-amber-500 text-black" : "bg-zinc-800 text-zinc-400 hover:text-white"}`}>
+                      {n}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleDownloadZip}
+                  disabled={completedBlobsRef.current.size === 0}
+                  title={`Download ${completedBlobsRef.current.size} completed file(s) as ZIP`}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-[#0c0c0c] border border-white/5 hover:border-emerald-500/40 rounded-xl text-[10px] font-bold text-zinc-400 hover:text-emerald-400 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                  ZIP All
+                </button>
+              </div>
+
               {/* Action triggers */}
               {!isProcessingQueue ? (
                 <button
@@ -1881,12 +2638,12 @@ export default function App() {
                 >
                   <span className="absolute -inset-0.5 bg-gradient-to-r from-orange-500 to-[#ff4e00] blur opacity-30 group-hover:opacity-60 transition-opacity pointer-events-none"></span>
                   <DownloadCloud className="relative w-4 h-4 stroke-3 animate-bounce" />
-                  <span className="relative">Process Batch Transcoding Queue</span>
+                  <span className="relative">Process Batch Queue · Ctrl+Shift+Enter</span>
                 </button>
               ) : (
                 <div className="w-full py-4 bg-[#ff4e00]/10 text-[#ff8c00] font-bold text-xs tracking-wider uppercase text-center rounded-xl border border-[#ff4e00]/20 flex items-center justify-center gap-2 animate-pulse">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  Transcoding Queue sequence running (Index: {activeQueueIndex + 1}/{queue.length})
+                  Processing Queue (threads: {concurrentLimit}) — item {activeQueueIndex + 1}/{queue.length}
                 </div>
               )}
             </motion.div>
@@ -1899,8 +2656,10 @@ export default function App() {
                 tags={tags}
                 thumbnailUrl={tags.coverUrl}
                 isOptimizing={isOptimizingTags}
+                isMusicBrainzLoading={isMusicBrainzLoading}
                 onTagsChange={setTags}
                 onTriggerOptimize={() => triggerTagOptimization(tags.title, tags.artist)}
+                onMusicBrainzLookup={handleMusicBrainzLookup}
                 hasVideoLoaded={!!videoMetadata}
               />
 
@@ -1910,21 +2669,31 @@ export default function App() {
                     <Sparkles className="w-4 h-4 text-[#ff4e00]" />
                     <h3 className="font-heading font-semibold text-white text-base">Quick Studio Profiles</h3>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSettings(prev => ({
-                        ...defaultSettings,
-                        trimStart: prev.trimStart,
-                        trimEnd: prev.trimEnd
-                      }));
-                      setLogs(prev => [...prev, "AUDIO_PROFILE: Reset studio profile to default conversion settings."]);
-                    }}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-950 hover:bg-zinc-900 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-500 hover:text-white transition-colors cursor-pointer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    Reset
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowPresetModal(true)}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#ff4e00]/10 hover:bg-[#ff4e00]/20 border border-[#ff4e00]/20 rounded-lg text-[10px] font-bold text-[#ff8c00] transition-colors cursor-pointer"
+                    >
+                      <Save className="w-3 h-3" />
+                      Save Preset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettings(prev => ({
+                          ...defaultSettings,
+                          trimStart: prev.trimStart,
+                          trimEnd: prev.trimEnd
+                        }));
+                        setLogs(prev => [...prev, "AUDIO_PROFILE: Reset studio profile to default conversion settings."]);
+                      }}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-950 hover:bg-zinc-900 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-500 hover:text-white transition-colors cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Reset
+                    </button>
+                  </div>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-2">
                   {AUDIO_PROFILES.map((profile) => (
@@ -1939,6 +2708,34 @@ export default function App() {
                     </button>
                   ))}
                 </div>
+
+                {/* User-saved presets */}
+                {savedPresets.length > 0 && (
+                  <div className="border-t border-white/5 pt-3 flex flex-col gap-2">
+                    <span className="text-[10px] uppercase font-mono font-bold text-zinc-500 tracking-wider">Saved Presets</span>
+                    <div className="flex flex-wrap gap-2">
+                      {savedPresets.map(preset => (
+                        <div key={preset.id} className="flex items-center gap-1 bg-[#080808] border border-white/5 rounded-lg px-2.5 py-1.5 group">
+                          <button
+                            type="button"
+                            onClick={() => handleApplySavedPreset(preset)}
+                            className="text-[11px] font-bold text-zinc-300 hover:text-white transition-colors cursor-pointer"
+                          >
+                            {preset.name}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteSavedPreset(preset.id)}
+                            title="Delete preset"
+                            className="opacity-0 group-hover:opacity-100 transition-opacity ml-1 text-zinc-600 hover:text-rose-400 cursor-pointer"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <AudioSettingsPanel
@@ -1989,6 +2786,14 @@ export default function App() {
                 isProcessing={isConverting}
                 isCompleted={isCompleted}
                 speedMultiplier={(settings.bitrate === 320 ? 12 : settings.bitrate === 256 ? 15 : 18)}
+                currentTime={audioCurrentTime}
+                duration={audioDuration}
+                onSeek={(time) => {
+                  if (audioRef.current) {
+                    audioRef.current.currentTime = time;
+                    setAudioCurrentTime(time);
+                  }
+                }}
               />
 
               <div className="bg-[#080808] border border-white/5 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -2071,13 +2876,15 @@ export default function App() {
                         <span className="text-[10px] bg-[#ff4e00]/10 text-[#ff8c00] font-bold font-mono px-2 py-0.5 rounded shrink-0 ml-2">HIFI</span>
                       </div>
                       <audio
+                        ref={audioRef}
                         src={audioUrl}
                         controls
-                        className="w-full h-8"
-                        style={{ accentColor: "#ff4e00", colorScheme: "dark" }}
+                        className="w-full h-8 accent-orange-500"
                         onPlay={() => setIsPlaying(true)}
                         onPause={() => setIsPlaying(false)}
-                        onEnded={() => setIsPlaying(false)}
+                        onEnded={() => { setIsPlaying(false); setAudioCurrentTime(0); }}
+                        onTimeUpdate={e => setAudioCurrentTime(e.currentTarget.currentTime)}
+                        onLoadedMetadata={e => setAudioDuration(e.currentTarget.duration)}
                       />
                     </div>
                   )}
@@ -2154,6 +2961,60 @@ export default function App() {
         </div>
       </footer>
 
+      {/* ── Save Preset Modal ── */}
+      <AnimatePresence>
+        {showPresetModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-md z-[200] flex items-center justify-center p-4"
+            onClick={() => setShowPresetModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-[#111] border border-white/10 rounded-2xl w-full max-w-sm p-6 shadow-2xl flex flex-col gap-4"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Save className="w-4 h-4 text-[#ff4e00]" />
+                  <h3 className="text-sm font-bold text-white">Save Settings Preset</h3>
+                </div>
+                <button type="button" onClick={() => setShowPresetModal(false)} className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer transition-colors">
+                  <X className="w-4 h-4 text-zinc-400" />
+                </button>
+              </div>
+              <p className="text-xs text-zinc-400">Saves the current format, DSP, and processing settings as a named preset you can recall any time.</p>
+              <input
+                type="text"
+                value={presetName}
+                onChange={e => setPresetName(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleSavePreset()}
+                placeholder="Preset name (e.g. My Podcast)"
+                autoFocus
+                className="w-full px-3.5 py-2.5 bg-[#080808] border border-white/10 focus:border-[#ff4e00] rounded-xl text-sm text-white focus:outline-hidden placeholder:text-zinc-600 transition-all"
+              />
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setShowPresetModal(false)} className="flex-1 py-2.5 bg-zinc-900 border border-white/10 rounded-xl text-xs font-bold text-zinc-400 hover:text-white transition-colors cursor-pointer">
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSavePreset}
+                  disabled={!presetName.trim()}
+                  className="flex-1 py-2.5 bg-[#ff4e00] hover:bg-orange-500 rounded-xl text-xs font-bold text-white transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  Save Preset
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* ── Download History Panel ── */}
       {showHistory && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[200] flex items-start justify-end p-4 sm:p-8">
@@ -2227,6 +3088,120 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Toast notifications */}
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+
+      {/* Keyboard shortcuts overlay */}
+      <AnimatePresence>
+        {showShortcuts && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-md z-[300] flex items-center justify-center p-4"
+            onClick={() => setShowShortcuts(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-[#111] border border-white/10 rounded-2xl w-full max-w-sm p-6 shadow-2xl flex flex-col gap-4"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Keyboard className="w-4 h-4 text-[#ff4e00]" />
+                  <h3 className="text-sm font-bold text-white">Keyboard Shortcuts</h3>
+                </div>
+                <button type="button" onClick={() => setShowShortcuts(false)} className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer transition-colors">
+                  <X className="w-4 h-4 text-zinc-400" />
+                </button>
+              </div>
+              <div className="flex flex-col gap-2 text-xs font-mono">
+                {[
+                  ["Space", "Play / Pause preview audio"],
+                  ["Ctrl + Enter", "Convert & Download current track"],
+                  ["Ctrl + Shift + Enter", "Process queue"],
+                  ["Esc", "Close modals"],
+                  ["Ctrl + /", "Toggle this shortcut reference"],
+                ].map(([keys, desc]) => (
+                  <div key={keys} className="flex items-center justify-between gap-4">
+                    <span className="text-zinc-300 bg-zinc-800 px-2 py-1 rounded text-[10px] font-bold shrink-0">{keys}</span>
+                    <span className="text-zinc-500 text-right text-[11px]">{desc}</span>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Related videos panel (shown when loaded) */}
+      <AnimatePresence>
+        {showRelated && relatedVideos.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, x: 40 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 40 }}
+            className="fixed top-20 right-4 z-[150] w-72 bg-[#111] border border-white/10 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
+              <span className="text-xs font-bold text-white flex items-center gap-2">
+                <Activity className="w-3.5 h-3.5 text-[#ff4e00]" /> Related
+              </span>
+              <button type="button" onClick={() => setShowRelated(false)} className="text-zinc-500 hover:text-white cursor-pointer transition-colors">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="flex flex-col divide-y divide-white/5 max-h-80 overflow-y-auto">
+              {relatedVideos.map((v, i) => (
+                <button
+                  key={i} type="button"
+                  onClick={() => { handleLoadMetadata(v.url); setShowRelated(false); }}
+                  className="flex flex-col gap-0.5 px-4 py-2.5 hover:bg-white/5 text-left cursor-pointer transition-colors"
+                >
+                  <span className="text-[11px] font-semibold text-white truncate">{v.title}</span>
+                  <span className="text-[10px] text-zinc-500 truncate">{v.channel}</span>
+                </button>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Artist discography panel */}
+      <AnimatePresence>
+        {showArtistVideos && artistVideos.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, x: -40 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -40 }}
+            className="fixed top-20 left-4 z-[150] w-72 bg-[#111] border border-white/10 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
+              <span className="text-xs font-bold text-white flex items-center gap-2">
+                <Users className="w-3.5 h-3.5 text-purple-400" /> {tags.artist || "Artist"}
+              </span>
+              <button type="button" onClick={() => setShowArtistVideos(false)} className="text-zinc-500 hover:text-white cursor-pointer transition-colors">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="flex flex-col divide-y divide-white/5 max-h-80 overflow-y-auto">
+              {artistVideos.map((v, i) => (
+                <button
+                  key={i} type="button"
+                  onClick={() => { handleLoadMetadata(v.url); setShowArtistVideos(false); }}
+                  className="flex flex-col gap-0.5 px-4 py-2.5 hover:bg-white/5 text-left cursor-pointer transition-colors"
+                >
+                  <span className="text-[11px] font-semibold text-white truncate">{v.title}</span>
+                  <span className="text-[10px] text-zinc-500 truncate">{v.channel}</span>
+                </button>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

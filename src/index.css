@@ -96,6 +96,27 @@
     0 0 12px rgba(255, 78, 0, 0.24);
 }
 
+/* ── Light mode: invert the dark theme while preserving accent hues ── */
+#app_root.light-mode {
+  filter: invert(1) hue-rotate(180deg);
+}
+/* Counter-filter on media so images/canvas render at original colors */
+#app_root.light-mode img,
+#app_root.light-mode canvas,
+#app_root.light-mode video {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+/* Vertical EQ band slider */
+.eq-band-slider {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 100%;
+  height: 80px;
+  cursor: pointer;
+  accent-color: #22d3ee;
+}
+
 @layer base {
   body {
     font-family: var(--font-sans);

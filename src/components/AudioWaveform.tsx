@@ -1,14 +1,27 @@
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef } from "react";
 
 interface WaveformProps {
   isProcessing: boolean;
   isCompleted: boolean;
-  speedMultiplier: number; // e.g., 5x, 12x
+  speedMultiplier: number;
+  currentTime?: number;
+  duration?: number;
+  onSeek?: (time: number) => void;
 }
 
-export default function AudioWaveform({ isProcessing, isCompleted, speedMultiplier }: WaveformProps) {
+export default function AudioWaveform({
+  isProcessing,
+  isCompleted,
+  speedMultiplier,
+  currentTime = 0,
+  duration = 0,
+  onSeek
+}: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const phaseRef = useRef(0);
+  // Keep latest props accessible inside the animation loop without re-creating it
+  const propsRef = useRef({ currentTime, duration });
+  propsRef.current = { currentTime, duration };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -20,7 +33,6 @@ export default function AudioWaveform({ isProcessing, isCompleted, speedMultipli
     let animId: number;
 
     const render = () => {
-      // Handle resizing if container changed
       const dpr = window.devicePixelRatio || 1;
       const rect = canvas.getBoundingClientRect();
       if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
@@ -42,45 +54,62 @@ export default function AudioWaveform({ isProcessing, isCompleted, speedMultipli
 
         for (let x = 0; x < width; x++) {
           const relativeX = x / width;
-          // Fade wave edges so it looks beautiful
           const fade = Math.sin(relativeX * Math.PI);
-          
-          let y = (height / 2);
+
+          let y = height / 2;
           if (isProcessing) {
             y += Math.sin(relativeX * Math.PI * frequency + phaseRef.current + phaseShift) * amplitude * fade;
           } else if (isCompleted) {
-            // Static flat beautiful wave
             y += Math.sin(relativeX * Math.PI * frequency + phaseShift) * 4 * fade;
           } else {
-            // Idle tiny heartbeat wave
             y += Math.sin(relativeX * Math.PI * 2 + phaseShift) * 2 * fade;
           }
 
-          if (x === 0) {
-            ctx.moveTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
-          }
+          if (x === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
         }
         ctx.stroke();
       };
 
       if (isProcessing) {
         phaseRef.current += 0.08 * (1 + speedMultiplier / 10);
-        // Draw 3 layers of glowing orange design waves
         drawWave("rgba(255, 78, 0, 0.15)", 40, 4, 0, 1.5);
         drawWave("rgba(255, 170, 0, 0.3)", 55, 6, Math.PI / 3, 2);
         drawWave("rgb(255, 78, 0)", 30, 8, Math.PI / 1.5, 3.5);
       } else if (isCompleted) {
-        // Complete static emerald neon wave
         drawWave("rgba(0, 255, 157, 0.15)", 15, 6, 0, 1.5);
         drawWave("rgba(0, 255, 157, 0.4)", 20, 8, Math.PI / 3, 2);
         drawWave("rgb(0, 255, 157)", 10, 10, Math.PI / 1.5, 3);
       } else {
-        // Idle calm zinc wave
         drawWave("rgba(240, 240, 240, 0.05)", 10, 4, 0, 1);
         drawWave("rgba(240, 240, 240, 0.1)", 15, 6, Math.PI / 3, 1.5);
         drawWave("rgba(240, 240, 240, 0.15)", 8, 8, Math.PI / 1.5, 2);
+      }
+
+      // Playback cursor
+      const { currentTime: ct, duration: dur } = propsRef.current;
+      if (dur > 0 && ct >= 0) {
+        const cursorX = (ct / dur) * width;
+
+        // Played region overlay
+        ctx.fillStyle = "rgba(255,255,255,0.04)";
+        ctx.fillRect(0, 0, cursorX, height);
+
+        // Cursor line
+        ctx.beginPath();
+        ctx.strokeStyle = "rgba(255,255,255,0.75)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 3]);
+        ctx.moveTo(cursorX, 0);
+        ctx.lineTo(cursorX, height);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Cursor handle dot
+        ctx.beginPath();
+        ctx.fillStyle = "#ffffff";
+        ctx.arc(cursorX, height / 2, 4, 0, Math.PI * 2);
+        ctx.fill();
       }
 
       animId = requestAnimationFrame(render);
@@ -93,15 +122,31 @@ export default function AudioWaveform({ isProcessing, isCompleted, speedMultipli
     };
   }, [isProcessing, isCompleted, speedMultiplier]);
 
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!onSeek || duration <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = (e.clientX - rect.left) / rect.width;
+    onSeek(Math.max(0, Math.min(duration, ratio * duration)));
+  };
+
   return (
     <div id="audio_waveform_container" className="relative w-full h-32 bg-[#121212] border border-white/5 rounded-xl overflow-hidden flex flex-col justify-end p-2 shadow-inner">
-      <canvas ref={canvasRef} className="w-full h-full absolute inset-0" />
+      <canvas
+        ref={canvasRef}
+        className={`w-full h-full absolute inset-0 ${duration > 0 && onSeek ? "cursor-pointer" : ""}`}
+        onClick={handleClick}
+        title={duration > 0 && onSeek ? "Click to seek" : undefined}
+      />
       <div className="relative z-10 flex justify-between items-center w-full px-2 text-[10px] font-mono text-zinc-500 select-none">
-        <span>0.00s</span>
+        <span>{duration > 0 ? `${Math.floor(currentTime / 60)}:${String(Math.floor(currentTime % 60)).padStart(2, "0")}` : "0:00"}</span>
         <span className="animate-pulse text-[#ff4e00] font-semibold text-center">
-          {isProcessing ? `TRANSCODING REALTIME • ${speedMultiplier}X SPEED` : isCompleted ? "COMPLETED" : "IDLE (WAITING FOR QUEUE)"}
+          {isProcessing
+            ? `TRANSCODING REALTIME • ${speedMultiplier}X SPEED`
+            : isCompleted
+            ? duration > 0 ? "CLICK WAVEFORM TO SEEK" : "COMPLETED"
+            : "IDLE (WAITING FOR QUEUE)"}
         </span>
-        <span>TRIM DURATION</span>
+        <span>{duration > 0 ? `${Math.floor(duration / 60)}:${String(Math.floor(duration % 60)).padStart(2, "0")}` : "TRIM DURATION"}</span>
       </div>
     </div>
   );

@@ -1,12 +1,14 @@
 import { ID3Tags } from "../types";
-import { Tag, Sparkles, Disc, User, FolderHeart, Calendar, TagIcon } from "lucide-react";
+import { Tag, Sparkles, Disc, User, FolderHeart, Calendar, TagIcon, Search } from "lucide-react";
 
 interface ID3TagEditorProps {
   tags: ID3Tags;
   thumbnailUrl: string;
   isOptimizing: boolean;
+  isMusicBrainzLoading?: boolean;
   onTagsChange: (tags: ID3Tags) => void;
   onTriggerOptimize: () => void;
+  onMusicBrainzLookup?: () => void;
   hasVideoLoaded: boolean;
 }
 
@@ -14,21 +16,20 @@ export default function ID3TagEditor({
   tags,
   thumbnailUrl,
   isOptimizing,
+  isMusicBrainzLoading = false,
   onTagsChange,
   onTriggerOptimize,
+  onMusicBrainzLookup,
   hasVideoLoaded
 }: ID3TagEditorProps) {
 
   const handleFieldChange = (key: keyof ID3Tags, value: string) => {
-    onTagsChange({
-      ...tags,
-      [key]: value
-    });
+    onTagsChange({ ...tags, [key]: value });
   };
 
   return (
     <div id="id3_tag_editor" className="bg-[#121212] rounded-2xl border border-white/5 p-6 shadow-2xl flex flex-col gap-6">
-      
+
       <div className="flex justify-between items-center border-b border-white/5 pb-3">
         <div className="flex items-center gap-2">
           <Tag className="w-5 h-5 text-[#ff4e00]" />
@@ -38,20 +39,34 @@ export default function ID3TagEditor({
         </div>
 
         {hasVideoLoaded && (
-          <button
-            type="button"
-            onClick={onTriggerOptimize}
-            disabled={isOptimizing}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-[#ff4e00]/10 hover:bg-[#ff4e00]/20 text-[#ff8c00] text-xs font-semibold rounded-xl border border-[#ff4e00]/20 transition-all cursor-pointer disabled:opacity-60"
-          >
-            <Sparkles className={`w-3.5 h-3.5 ${isOptimizing ? "animate-spin text-[#ff8c00]" : "text-[#ff4e00]"}`} />
-            {isOptimizing ? "Optimizing tags..." : "Auto Optimize"}
-          </button>
+          <div className="flex items-center gap-2">
+            {onMusicBrainzLookup && (
+              <button
+                type="button"
+                onClick={onMusicBrainzLookup}
+                disabled={isMusicBrainzLoading}
+                title="Look up real metadata from MusicBrainz database"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 text-xs font-semibold rounded-xl border border-purple-500/20 transition-all cursor-pointer disabled:opacity-60"
+              >
+                <Search className={`w-3.5 h-3.5 ${isMusicBrainzLoading ? "animate-spin" : ""}`} />
+                {isMusicBrainzLoading ? "Searching..." : "MusicBrainz"}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onTriggerOptimize}
+              disabled={isOptimizing}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#ff4e00]/10 hover:bg-[#ff4e00]/20 text-[#ff8c00] text-xs font-semibold rounded-xl border border-[#ff4e00]/20 transition-all cursor-pointer disabled:opacity-60"
+            >
+              <Sparkles className={`w-3.5 h-3.5 ${isOptimizing ? "animate-spin text-[#ff8c00]" : "text-[#ff4e00]"}`} />
+              {isOptimizing ? "Optimizing tags..." : "Auto Optimize"}
+            </button>
+          </div>
         )}
       </div>
 
       <div className="flex flex-col md:flex-row gap-6">
-        
+
         {/* Cover Art Preview */}
         <div className="w-full md:w-44 flex flex-col gap-2 shrink-0">
           <span className="text-[10px] uppercase tracking-wider font-bold text-zinc-500 font-mono">
@@ -83,7 +98,7 @@ export default function ID3TagEditor({
 
         {/* Form Fields */}
         <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-4">
-          
+
           <div className="flex flex-col gap-1.5 sm:col-span-2">
             <label className="text-xs font-semibold text-zinc-400 flex items-center gap-1">
               <Disc className="w-3.5 h-3.5 text-zinc-500" /> Audio Track Title
@@ -151,9 +166,7 @@ export default function ID3TagEditor({
           </div>
 
         </div>
-
       </div>
-
     </div>
   );
 }

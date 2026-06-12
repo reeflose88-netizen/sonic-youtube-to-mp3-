@@ -1,5 +1,7 @@
 import { AudioSettings } from "../types";
-import { Sliders, Volume2, Scissors, Music, Headphones, Flame, AudioLines, Radio, Gauge, Sparkles, Timer, Waves, Mic2 } from "lucide-react";
+import { Sliders, Volume2, Scissors, Music, Headphones, Flame, AudioLines, Radio, Gauge, Sparkles, Timer, Waves, Mic2, Image, Wind, BarChart3 } from "lucide-react";
+
+const EQ_BAND_LABELS = ["60Hz", "250Hz", "1kHz", "4kHz", "12kHz"] as const;
 
 const EQ_PRESETS: Array<{ id: AudioSettings["equalizer"]; label: string }> = [
   { id: "flat", label: "Flat" },
@@ -444,6 +446,92 @@ export default function AudioSettingsPanel({ settings, durationSeconds = 220, on
               </button>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* Thumbnail Embedding */}
+      <div className="flex items-center justify-between gap-3 border border-white/5 bg-[#080808] p-4 rounded-xl">
+        <div className="flex items-center gap-2">
+          <Image className="w-4 h-4 text-zinc-500" />
+          <div className="flex flex-col">
+            <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Embed Album Art</span>
+            <span className="text-[10.5px] text-zinc-600 font-sans leading-snug">Attach YouTube thumbnail into the audio file's cover art tag (MP3, FLAC, M4A)</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => updateSetting("embedThumbnail", !settings.embedThumbnail)}
+          className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border transition-all cursor-pointer shrink-0 ${
+            settings.embedThumbnail
+              ? "bg-[#ff4e00] border-[#ff4e00] text-white shadow-[0_0_10px_rgba(255,78,0,0.3)]"
+              : "bg-zinc-950 border-white/10 text-zinc-500 hover:text-white"
+          }`}
+        >
+          {settings.embedThumbnail ? "On" : "Off"}
+        </button>
+      </div>
+
+      {/* Reverb Effect */}
+      <div className="flex items-center gap-4 border border-white/5 bg-[#080808] p-4 rounded-xl">
+        <Wind className="w-4 h-4 text-indigo-400 shrink-0" />
+        <div className="flex flex-col flex-1 gap-1.5">
+          <div className="flex justify-between items-center">
+            <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Reverb / Space</span>
+            <span className="text-xs font-mono font-bold text-indigo-400 bg-indigo-950/60 px-2 py-0.5 rounded">
+              {settings.reverb === 0 ? "Off" : `${settings.reverb}%`}
+            </span>
+          </div>
+          <input
+            type="range" min="0" max="100" step="1"
+            title={`Reverb level: ${settings.reverb}%`}
+            value={settings.reverb}
+            onChange={(e) => updateSetting("reverb", parseInt(e.target.value))}
+            className="w-full"
+          />
+          <span className="text-[10.5px] text-zinc-600 leading-snug">Simulates room ambience via echo delay filter (aecho). 0 = dry signal.</span>
+        </div>
+      </div>
+
+      {/* 5-Band Parametric EQ */}
+      <div className="border border-white/5 bg-[#080808] p-4 rounded-xl flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <BarChart3 className="w-4 h-4 text-cyan-400" />
+            <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">5-Band Parametric EQ</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => updateSetting("eqBands", [0, 0, 0, 0, 0])}
+            className="text-[10px] text-zinc-600 hover:text-zinc-300 uppercase tracking-wider font-semibold transition-colors cursor-pointer"
+          >
+            Reset
+          </button>
+        </div>
+        <div className="grid grid-cols-5 gap-3">
+          {EQ_BAND_LABELS.map((label, i) => {
+            const gain = settings.eqBands?.[i] ?? 0;
+            return (
+              <div key={label} className="flex flex-col items-center gap-2">
+                <span className={`text-[10px] font-mono font-bold ${gain > 0 ? "text-cyan-400" : gain < 0 ? "text-amber-400" : "text-zinc-600"}`}>
+                  {gain > 0 ? `+${gain}` : gain}dB
+                </span>
+                <div className="flex flex-col items-center gap-1 h-24 justify-center relative">
+                  <input
+                    type="range" min="-12" max="12" step="0.5"
+                    title={`${label}: ${gain > 0 ? "+" : ""}${gain}dB`}
+                    value={gain}
+                    onChange={(e) => {
+                      const next = [...(settings.eqBands ?? [0,0,0,0,0])] as [number,number,number,number,number];
+                      next[i] = parseFloat(e.target.value);
+                      updateSetting("eqBands", next);
+                    }}
+                    className="eq-band-slider"
+                  />
+                </div>
+                <span className="text-[9px] font-mono text-zinc-500 text-center">{label}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
 
