@@ -4,5 +4,8 @@ dist/
 coverage/
 .DS_Store
 *.log
+dev-server.log
 .env*
 !.env.example
+.tmp-audio/
+.tmp-pyi/

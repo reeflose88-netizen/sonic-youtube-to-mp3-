@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Youtube, Sparkles, Music, Sliders, Play, Pause, AlertTriangle,
   ArrowRight, Compass, ExternalLink, Download, Clock, Library, ListTodo, User,
   Trash2, Plus, RefreshCw, Bot, CheckCircle2, FolderPlus, DownloadCloud, PlayCircle, History, X,
   FileDown, FileUp, Search, Filter, RotateCcw, Layers,
   Sun, Moon, GripVertical, Settings2, BookOpen, Save, FileMusic, ChevronDown, ChevronRight, Eye,
-  Archive, Zap, Users, Activity, ChevronUp, Keyboard
+  Archive, Zap, Users, Activity, ChevronUp, Keyboard, ClipboardCheck, ShieldCheck
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -317,7 +317,7 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   // Collapsible UI panels
-  const [collapsedPanels, setCollapsedPanels] = useState<Set<string>>(new Set());
+  const [collapsedPanels, setCollapsedPanels] = useState<Set<string>>(new Set(["id3", "dsp", "console"]));
 
   // Related videos & artist discography
   const [relatedVideos, setRelatedVideos] = useState<Array<{title:string;channel:string;url:string}>>([]);
@@ -332,21 +332,72 @@ export default function App() {
 
   // Concurrent queue processing
   const [concurrentLimit, setConcurrentLimit] = useState(1);
+  const [isQueuePaused, setIsQueuePaused] = useState(false);
 
   // Completed blobs for ZIP download
   const completedBlobsRef = useRef<Map<string, { data: Uint8Array; filename: string }>>(new Map());
+  const [completedZipCacheSize, setCompletedZipCacheSize] = useState(0);
 
   // SSE cleanup
   const sseCleanupRef = useRef<(() => void) | null>(null);
 
   // Keyboard shortcut hint visibility
   const [showShortcuts, setShowShortcuts] = useState(false);
+
+  const smartRecommendation = useMemo(() => {
+    const source = `${tags.title} ${tags.artist} ${videoMetadata?.title || ""} ${videoMetadata?.author || ""}`.toLowerCase();
+    const isPodcast = source.includes("podcast") || source.includes("interview") || source.includes("speech") || source.includes("lecture");
+    const isLofi = source.includes("lofi") || source.includes("lo-fi") || source.includes("chill") || source.includes("study");
+    const isClub = source.includes("club") || source.includes("edm") || source.includes("dance") || source.includes("remix") || (detectedBpm !== null && detectedBpm >= 118);
+    const isArchive = settings.format === "flac" || source.includes("live") || source.includes("concert");
+
+    if (isPodcast) {
+      return {
+        label: "Podcast Voice",
+        reason: "Speech-first source detected. Mono, vocal EQ, denoise, and LUFS normalization will improve clarity.",
+        settings: { conversionMode: "vocal_master", equalizer: "vocal", channelMode: "mono", bitrate: 192, compression: 62, normalizeLoudness: true, loudnessTarget: -16, noiseReduction: 30, stereoWidth: 0.9, reverb: 0 } as Partial<AudioSettings>
+      };
+    }
+    if (isLofi) {
+      return {
+        label: "Lo-Fi Warmth",
+        reason: "Chill/lo-fi cues found. Soft compression, a low-pass edge, and mild width fit playlist listening.",
+        settings: { conversionMode: "audio_mix", equalizer: "lofi", bitrate: 256, compression: 52, normalizeLoudness: false, highPass: 120, lowPass: 9000, stereoWidth: 1.22, reverb: 8 } as Partial<AudioSettings>
+      };
+    }
+    if (isClub) {
+      return {
+        label: "Club Master",
+        reason: "Dance tempo or remix cues found. Louder target, wide stereo, bass EQ, and limiter headroom fit DJ playback.",
+        settings: { conversionMode: "club_master", equalizer: "bass", bitrate: 320, compression: 72, normalizeLoudness: true, loudnessTarget: -10, stereoWidth: 1.45, reverb: 4 } as Partial<AudioSettings>
+      };
+    }
+    if (isArchive) {
+      return {
+        label: "Archive Capture",
+        reason: "Archive-style source detected. FLAC, minimal DSP, and high sample rate preserve the original signal.",
+        settings: { format: "flac", bitrate: 320, sampleRate: 48000, conversionMode: "standard", equalizer: "flat", compression: 0, normalizeLoudness: false, stereoWidth: 1, reverb: 0 } as Partial<AudioSettings>
+      };
+    }
+    return {
+      label: "Studio Master",
+      reason: "Balanced music profile. Clean mastering, moderate compression, and -14 LUFS suit general listening.",
+      settings: { conversionMode: "mastering", equalizer: "flat", bitrate: 320, compression: 45, normalizeLoudness: true, loudnessTarget: -14, stereoWidth: 1.15, reverb: 0 } as Partial<AudioSettings>
+    };
+  }, [detectedBpm, settings.format, tags.artist, tags.title, videoMetadata?.author, videoMetadata?.title]);
+
   const queueStats = {
     pending: queue.filter(item => item.status === "pending").length,
     active: queue.filter(item => ["fetching_meta", "optimizing_tags", "converting"].includes(item.status)).length,
     completed: queue.filter(item => item.status === "completed").length,
     failed: queue.filter(item => item.status === "failed").length
   };
+  const sessionHealth = useMemo(() => {
+    const hasBackend = backendHealth.status === "ready";
+    const queueLoad = queueStats.pending + queueStats.active;
+    const status = !hasBackend ? "Needs backend" : queueStats.failed > 0 ? "Review failed jobs" : queueLoad > 0 ? "Ready for batch" : "Ready";
+    return { cacheFiles: completedZipCacheSize, hasBackend, queueLoad, status };
+  }, [backendHealth.status, completedZipCacheSize, queueStats.active, queueStats.failed, queueStats.pending]);
   const filteredQueueEntries = queue
     .map((item, idx) => ({ item, idx }))
     .filter(({ item }) => queueStatusFilter === "all" || item.status === queueStatusFilter)
@@ -363,6 +414,13 @@ export default function App() {
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
   }, [audioUrl, previewUrl]);
+
+  useEffect(() => {
+    return () => {
+      sseCleanupRef.current?.();
+      sseCleanupRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -410,7 +468,7 @@ export default function App() {
     } catch (err) {
       console.warn("Failed to save Sonic workspace:", err);
     }
-  }, [isWorkspaceReady, settings, tags, queue, recentUrls, filenameTemplate, downloadHistory]);
+  }, [isWorkspaceReady, settings, tags, queue, recentUrls, filenameTemplate, lightMode, savedPresets, downloadHistory]);
 
   useEffect(() => {
     let isMounted = true;
@@ -458,6 +516,10 @@ export default function App() {
       if (e.code === "Enter" && e.ctrlKey && e.shiftKey && !isProcessingQueue && queue.filter(i => i.status === "pending").length > 0) {
         e.preventDefault();
         handleProcessQueue();
+      }
+      if (e.code === "KeyP" && e.ctrlKey && isProcessingQueue) {
+        e.preventDefault();
+        setIsQueuePaused(prev => !prev);
       }
       if (e.code === "Slash" && e.ctrlKey) { e.preventDefault(); setShowShortcuts(prev => !prev); }
     };
@@ -677,6 +739,9 @@ export default function App() {
     setQueue([]);
     setActiveQueueIndex(-1);
     setIsProcessingQueue(false);
+    setIsQueuePaused(false);
+    completedBlobsRef.current.clear();
+    setCompletedZipCacheSize(0);
     setLogs(prev => [...prev, "QUEUE: Transcoding queue slate cleared."]);
   };
 
@@ -688,12 +753,16 @@ export default function App() {
         ? { ...item, status: "pending", progress: 0, error: undefined }
         : item
     )));
+    completedBlobsRef.current.clear();
+    setCompletedZipCacheSize(0);
     setLogs(prev => [...prev, `QUEUE: Reset ${retryCount} finished item${retryCount === 1 ? "" : "s"} back to pending.`]);
   };
 
   const handleRemoveCompletedQueueItems = () => {
     const completedCount = queue.filter(item => item.status === "completed").length;
     if (completedCount === 0) return;
+    queue.filter(item => item.status === "completed").forEach(item => completedBlobsRef.current.delete(item.id));
+    setCompletedZipCacheSize(completedBlobsRef.current.size);
     setQueue(prev => prev.filter(item => item.status !== "completed"));
     setLogs(prev => [...prev, `QUEUE: Removed ${completedCount} completed item${completedCount === 1 ? "" : "s"} from the queue.`]);
   };
@@ -718,7 +787,7 @@ export default function App() {
 
     const payload = {
       exportedAt: new Date().toISOString(),
-      app: "SonicMP3",
+      app: "BAD N3WS TUBE DOWNLOADER",
       queue: queue.map(item => normalizeQueueItem(item))
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -763,7 +832,7 @@ export default function App() {
       const parsed = JSON.parse(raw) as { queue?: QueueItem[] } | QueueItem[];
       const importedQueue = Array.isArray(parsed) ? parsed : parsed.queue;
       if (!Array.isArray(importedQueue)) {
-        throw new Error("This file does not contain a Sonic queue.");
+        throw new Error("This file does not contain a BAD N3WS queue.");
       }
 
       const safeQueue = importedQueue
@@ -1052,6 +1121,7 @@ export default function App() {
   // 7. Batch Downloader & converter processing loop
   const handleProcessQueue = async () => {
     if (isProcessingQueue) return;
+    setIsQueuePaused(false);
     setIsProcessingQueue(true);
     setLogs(prev => [...prev, `SYSTEM_BATCH: Commencing queue transcoder engine. Concurrency: ${concurrentLimit}.`]);
   };
@@ -1059,6 +1129,7 @@ export default function App() {
   // Manage execution of the queue (sequential or concurrent via SSE)
   useEffect(() => {
     if (!isProcessingQueue) return;
+    if (isQueuePaused) return;
 
     const activeStatuses = ["fetching_meta", "optimizing_tags", "converting"] as const;
     const activeCount = queue.filter(item => activeStatuses.includes(item.status as typeof activeStatuses[number])).length;
@@ -1171,6 +1242,7 @@ export default function App() {
         // Save blob for ZIP
         const blobData = new Uint8Array(await blob.arrayBuffer());
         completedBlobsRef.current.set(activeItem.id, { data: blobData, filename: fname });
+        setCompletedZipCacheSize(completedBlobsRef.current.size);
 
         const localUrl = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -1203,7 +1275,7 @@ export default function App() {
     };
 
     runProcessItem();
-  }, [isProcessingQueue, queue, concurrentLimit]);
+  }, [isProcessingQueue, isQueuePaused, queue, concurrentLimit]);
 
   // Convert/Transcode pipeline action — uses SSE job system for real progress
   const handleConvertAndDownload = async () => {
@@ -1350,6 +1422,42 @@ export default function App() {
     setCollapsedPanels(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   };
 
+  const handleApplySmartRecommendation = () => {
+    setSettings(prev => ({
+      ...prev,
+      ...smartRecommendation.settings,
+      trimStart: prev.trimStart,
+      trimEnd: prev.trimEnd
+    }));
+    addToast(`Applied ${smartRecommendation.label}`, "success");
+    setLogs(prev => [...prev, `SMART_MASTER: ${smartRecommendation.label} applied — ${smartRecommendation.reason}`]);
+  };
+
+  const handleCopySessionReport = async () => {
+    const report = [
+      "BAD N3WS TUBE DOWNLOADER Session Report",
+      `Generated: ${new Date().toLocaleString()}`,
+      "",
+      `Backend: ${backendHealth.status} (ffmpeg ${backendHealth.ffmpeg}, yt-dlp ${backendHealth.ytdlp})`,
+      `Current track: ${tags.artist || "Unknown"} - ${tags.title || videoMetadata?.title || "None"}`,
+      `Format: ${settings.format.toUpperCase()} ${settings.bitrate}kbps @ ${settings.sampleRate}Hz`,
+      `Mode: ${settings.conversionMode} / EQ: ${settings.equalizer}`,
+      `Smart recommendation: ${smartRecommendation.label}`,
+      `Queue: ${queueStats.pending} pending, ${queueStats.active} active, ${queueStats.completed} completed, ${queueStats.failed} failed`,
+      `ZIP cache: ${completedZipCacheSize} completed file(s) available`,
+      "",
+      "Recent log tail:",
+      ...logs.slice(-8).map(line => `- ${line}`)
+    ].join("\n");
+
+    try {
+      await navigator.clipboard.writeText(report);
+      addToast("Session report copied to clipboard", "success");
+    } catch {
+      addToast("Clipboard blocked by browser permissions", "error");
+    }
+  };
+
   // Fetch related videos
   const handleFetchRelated = async () => {
     if (!videoMetadata) return;
@@ -1446,6 +1554,8 @@ export default function App() {
 
   // Reset converter state
   const handleReset = () => {
+    sseCleanupRef.current?.();
+    sseCleanupRef.current = null;
     setYoutubeUrl("");
     setVideoMetadata(null);
     setTags(defaultID3);
@@ -1520,15 +1630,23 @@ export default function App() {
                 <span className="absolute -bottom-2 right-10 w-1.5 h-1.5 rounded-full bg-[#00ff9d] animate-pulse" />
               </div>
 
+              <motion.div
+                animate={{ opacity: [0.45, 1, 0.45], scale: [0.98, 1.03, 0.98] }}
+                transition={{ repeat: Infinity, duration: 1.2, ease: "easeInOut" }}
+                className="bad-news-ent-badge"
+              >
+                .BAD N3WS ENT.
+              </motion.div>
+
               <div className="flex flex-col gap-2">
                 <span className="text-[11px] font-bold font-mono uppercase tracking-widest text-[#ff4e00] animate-pulse">
-                  GEMINI AI STREAM RESOLVER
+                  BAD N3WS STREAM RESOLVER
                 </span>
                 <h3 className="text-xl font-heading font-black text-white leading-tight">
-                  Analyzing Media Stream Links...
+                  Loading Song URL Search...
                 </h3>
                 <p className="text-xs text-zinc-400 max-w-sm mt-1 leading-relaxed">
-                  Analyzing stream packets, isolating Lossless Audio lines, and preparing ID3 metadata profiles.
+                  BAD N3WS is finding the source stream, artwork, title data, and clean audio path.
                 </p>
               </div>
 
@@ -1536,15 +1654,15 @@ export default function App() {
               <div className="w-full bg-[#080808] border border-white/5 p-4 rounded-xl text-left font-mono text-[10px] text-zinc-500 flex flex-col gap-1.5 shadow-inner">
                 <div className="flex items-center gap-2">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#00ff9d] animate-ping"></span>
-                  <span className="text-zinc-300">Pinging YouTube stream daemons...</span>
+                  <span className="text-zinc-300">Contacting BAD N3WS URL search relay...</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#ffaa00] animate-pulse"></span>
-                  <span className="text-zinc-400">Extracting standard container bitrate blocks [VBR/CBR]</span>
+                  <span className="text-zinc-400">Checking stream container bitrate blocks [VBR/CBR]</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="w-1.5 h-1.5 rounded-full bg-zinc-700"></span>
-                  <span>Scraping cover artwork and high fidelity structures</span>
+                  <span>Preparing artwork, metadata, and high fidelity structures</span>
                 </div>
               </div>
 
@@ -1628,23 +1746,23 @@ export default function App() {
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
-        className="bg-[#080808]/85 border-b border-white/5 sticky top-0 z-50 py-5 px-6 md:px-12 backdrop-blur-md">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
+        className="bg-[#080808]/85 border-b border-white/5 sticky top-0 z-50 py-4 px-4 md:px-8 backdrop-blur-md">
+        <div className="max-w-[1500px] mx-auto flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4">
           <div className="flex items-center gap-3 select-none">
             <div className="w-10 h-10 bg-gradient-to-br from-[#ff4e00] to-[#802700] rounded-lg flex items-center justify-center shadow-[0_0_20px_rgba(255,78,0,0.4)]">
               <Youtube className="w-5.5 h-5.5 text-white stroke-2" />
             </div>
             <div className="flex flex-col">
-              <h1 className="font-heading font-extrabold text-2xl tracking-tight text-white leading-tight">
-                SONIC<span className="text-[#ff4e00]">MP3</span>
+              <h1 className="font-heading font-extrabold text-xl sm:text-2xl tracking-tight text-white leading-tight">
+                BAD N3WS <span className="text-[#ff4e00]">TUBE DOWNLOADER</span>
               </h1>
               <span className="text-[10.5px] font-semibold text-zinc-500 font-mono tracking-wider uppercase leading-none mt-0.5">
-                Powered by Local DSP & YouTube Search
+                BAD N3WS ENT. // Local DSP & Tube Search
               </span>
             </div>
           </div>
           
-          <div className="flex items-center gap-6 text-xs text-zinc-500 font-semibold font-mono tracking-wide">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500 font-semibold font-mono tracking-wide">
             <div className="flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full ${backendHealth.status === "ready" ? "bg-[#00ff9d]" : backendHealth.status === "degraded" ? "bg-[#ffaa00]" : "bg-rose-500"} animate-pulse`}></span>
               <span className="text-zinc-400">
@@ -1663,6 +1781,24 @@ export default function App() {
               {lightMode ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
               {lightMode ? "Dark" : "Light"}
             </button>
+            <button
+              type="button"
+              onClick={() => setShowShortcuts(true)}
+              title="Show keyboard shortcuts"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10.5px] font-bold text-zinc-300 hover:text-white transition-all cursor-pointer"
+            >
+              <Keyboard className="w-3.5 h-3.5" />
+              Keys
+            </button>
+            <button
+              type="button"
+              onClick={handleCopySessionReport}
+              title="Copy current session report"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10.5px] font-bold text-zinc-300 hover:text-white transition-all cursor-pointer"
+            >
+              <ClipboardCheck className="w-3.5 h-3.5" />
+              Report
+            </button>
             <input
               ref={queueFileInputRef}
               type="file"
@@ -1680,6 +1816,7 @@ export default function App() {
               Import Queue
             </button>
             <button
+              type="button"
               onClick={() => setShowHistory(true)}
               className="relative flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10.5px] font-bold text-zinc-300 hover:text-white transition-all cursor-pointer"
             >
@@ -1695,15 +1832,56 @@ export default function App() {
         </div>
       </motion.header>
 
+      <section className="w-full max-w-[1500px] mx-auto px-4 pt-6 md:px-8 relative z-10">
+        <div className="bg-[#121212] border border-white/5 rounded-2xl p-4 sm:p-5 shadow-2xl overflow-hidden relative">
+          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[#ff4e00]/70 to-transparent" />
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-lg bg-[#ff4e00]/10 border border-[#ff4e00]/20 flex items-center justify-center shrink-0">
+                <Sparkles className="w-5 h-5 text-[#ff4e00]" />
+              </div>
+              <div className="flex flex-col gap-1 min-w-0">
+                <span className="text-[10px] font-mono font-black uppercase text-[#ff8c00] tracking-wider">
+                  A message from BAD N3WS ENT.
+                </span>
+                <h2 className="font-heading text-lg sm:text-xl font-black text-white leading-tight">
+                  Welcome to BAD N3WS TUBE DOWNLOADER.
+                </h2>
+                <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed max-w-4xl">
+                  Drop in a song URL, search YouTube, scan playlists, or convert a local audio file. This workstation can preview tracks,
+                  split chapters, clean ID3 tags, fetch MusicBrainz metadata, embed cover art, tune audio with EQ/reverb/tempo/pitch/trim/fades,
+                  recommend a smart master, run batch queues with retries and parallel threads, export ZIP bundles, save presets, track history,
+                  and surface related videos or more from the artist.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-2 gap-2 xl:w-[360px] shrink-0">
+              {([
+                ["Input", "URL, search, playlist, local file"],
+                ["Audio", "DSP, EQ, reverb, smart master"],
+                ["Metadata", "ID3, cover art, MusicBrainz"],
+                ["Batch", "Queue, retry, ZIP, history"]
+              ] as const).map(([label, value]) => (
+                <div key={label} className="bg-[#080808] border border-white/5 rounded-xl px-3 py-2 min-w-0">
+                  <span className="block text-[9px] uppercase font-mono font-bold text-zinc-600">{label}</span>
+                  <span className="block text-[10.5px] text-zinc-300 font-semibold truncate">{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Main Content Area */}
-      <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-8 md:px-12 grid grid-cols-1 lg:grid-cols-12 gap-8 relative z-10">
+      <main className="flex-1 w-full max-w-[1500px] mx-auto px-4 py-6 md:px-8 grid grid-cols-1 lg:grid-cols-12 gap-6 relative z-10">
         
         {/* Left Column: Direct Converter Operations */}
         <motion.div
           initial={{ opacity: 0, x: -30 }}
           animate={{ opacity: 1, x: 0 }}
           transition={{ duration: 0.5, ease: "easeOut" }}
-          className="lg:col-span-7 flex flex-col gap-8">
+          className="lg:col-span-8 flex flex-col gap-6">
           
           {/* URL Entry Section */}
           <div className="bg-[#121212] rounded-2xl border border-white/5 p-6 shadow-2xl flex flex-col gap-5 relative group">
@@ -1951,6 +2129,28 @@ export default function App() {
                         <button type="button" onClick={handleFetchArtistDiscography} disabled={isLoadingArtist}
                           className="flex-1 py-2 bg-[#0c0c0c] border border-white/5 hover:border-violet-500/30 text-zinc-400 hover:text-violet-400 font-bold text-[10px] uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50">
                           {isLoadingArtist ? <span className="w-3 h-3 border border-violet-400/40 border-t-violet-400 rounded-full animate-spin" /> : <><Users className="w-3.5 h-3.5" />Artist</>}
+                        </button>
+                      </div>
+
+                      <div className="bg-[#0c0c0c] border border-white/5 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex items-start gap-2 min-w-0">
+                          <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                          <div className="flex flex-col min-w-0">
+                            <span className="text-[10px] uppercase font-mono tracking-widest text-emerald-400 font-bold">
+                              Smart Master Suggests: {smartRecommendation.label}
+                            </span>
+                            <span className="text-[11px] text-zinc-500 leading-snug">
+                              {smartRecommendation.reason}
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleApplySmartRecommendation}
+                          className="shrink-0 flex items-center justify-center gap-1.5 px-3 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg text-[10px] font-black uppercase tracking-wider text-emerald-300 transition-all cursor-pointer"
+                        >
+                          <Zap className="w-3.5 h-3.5" />
+                          Apply
                         </button>
                       </div>
 
@@ -2617,15 +2817,30 @@ export default function App() {
                     </button>
                   ))}
                 </div>
+                {isProcessingQueue && (
+                  <button
+                    type="button"
+                    onClick={() => setIsQueuePaused(prev => !prev)}
+                    title="Pause or resume starting new queue jobs"
+                    className={`flex items-center gap-1.5 px-3 py-2 border rounded-xl text-[10px] font-bold transition-all cursor-pointer ${
+                      isQueuePaused
+                        ? "bg-amber-500/15 border-amber-500/30 text-amber-300"
+                        : "bg-[#0c0c0c] border-white/5 text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    {isQueuePaused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
+                    {isQueuePaused ? "Resume" : "Pause"}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleDownloadZip}
-                  disabled={completedBlobsRef.current.size === 0}
-                  title={`Download ${completedBlobsRef.current.size} completed file(s) as ZIP`}
+                  disabled={completedZipCacheSize === 0}
+                  title={`Download ${completedZipCacheSize} completed file(s) as ZIP`}
                   className="flex items-center gap-1.5 px-3 py-2 bg-[#0c0c0c] border border-white/5 hover:border-emerald-500/40 rounded-xl text-[10px] font-bold text-zinc-400 hover:text-emerald-400 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Archive className="w-3.5 h-3.5" />
-                  ZIP All
+                  ZIP All ({completedZipCacheSize})
                 </button>
               </div>
 
@@ -2643,7 +2858,7 @@ export default function App() {
               ) : (
                 <div className="w-full py-4 bg-[#ff4e00]/10 text-[#ff8c00] font-bold text-xs tracking-wider uppercase text-center rounded-xl border border-[#ff4e00]/20 flex items-center justify-center gap-2 animate-pulse">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  Processing Queue (threads: {concurrentLimit}) — item {activeQueueIndex + 1}/{queue.length}
+                  {isQueuePaused ? "Queue Paused" : `Processing Queue (threads: ${concurrentLimit}) — item ${activeQueueIndex + 1}/${queue.length}`}
                 </div>
               )}
             </motion.div>
@@ -2652,16 +2867,31 @@ export default function App() {
           {/* Configurable Panels (Only show when video loaded successfully) */}
           {videoMetadata ? (
             <>
-              <ID3TagEditor
-                tags={tags}
-                thumbnailUrl={tags.coverUrl}
-                isOptimizing={isOptimizingTags}
-                isMusicBrainzLoading={isMusicBrainzLoading}
-                onTagsChange={setTags}
-                onTriggerOptimize={() => triggerTagOptimization(tags.title, tags.artist)}
-                onMusicBrainzLookup={handleMusicBrainzLookup}
-                hasVideoLoaded={!!videoMetadata}
-              />
+              <div className="flex flex-col gap-3">
+                <button
+                  type="button"
+                  onClick={() => togglePanel("id3")}
+                  className="w-full flex items-center justify-between gap-3 px-4 py-3 bg-[#121212] hover:bg-[#171717] border border-white/5 rounded-xl text-left transition-all cursor-pointer"
+                >
+                  <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    <User className="w-3.5 h-3.5 text-[#ff4e00]" />
+                    Metadata Studio
+                  </span>
+                  {collapsedPanels.has("id3") ? <ChevronDown className="w-4 h-4 text-zinc-500" /> : <ChevronUp className="w-4 h-4 text-zinc-500" />}
+                </button>
+                {!collapsedPanels.has("id3") && (
+                  <ID3TagEditor
+                    tags={tags}
+                    thumbnailUrl={tags.coverUrl}
+                    isOptimizing={isOptimizingTags}
+                    isMusicBrainzLoading={isMusicBrainzLoading}
+                    onTagsChange={setTags}
+                    onTriggerOptimize={() => triggerTagOptimization(tags.title, tags.artist)}
+                    onMusicBrainzLookup={handleMusicBrainzLookup}
+                    hasVideoLoaded={!!videoMetadata}
+                  />
+                )}
+              </div>
 
               <div className="bg-[#121212] rounded-2xl border border-white/5 p-5 shadow-2xl flex flex-col gap-3">
                 <div className="flex items-center justify-between gap-3">
@@ -2738,11 +2968,26 @@ export default function App() {
                 )}
               </div>
 
-              <AudioSettingsPanel
-                settings={settings}
-                durationSeconds={videoMetadata.durationSeconds || 220}
-                onChange={setSettings}
-              />
+              <div className="flex flex-col gap-3">
+                <button
+                  type="button"
+                  onClick={() => togglePanel("dsp")}
+                  className="w-full flex items-center justify-between gap-3 px-4 py-3 bg-[#121212] hover:bg-[#171717] border border-white/5 rounded-xl text-left transition-all cursor-pointer"
+                >
+                  <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    <Sliders className="w-3.5 h-3.5 text-[#ff4e00]" />
+                    DSP Console
+                  </span>
+                  {collapsedPanels.has("dsp") ? <ChevronDown className="w-4 h-4 text-zinc-500" /> : <ChevronUp className="w-4 h-4 text-zinc-500" />}
+                </button>
+                {!collapsedPanels.has("dsp") && (
+                  <AudioSettingsPanel
+                    settings={settings}
+                    durationSeconds={videoMetadata.durationSeconds || 220}
+                    onChange={setSettings}
+                  />
+                )}
+              </div>
             </>
           ) : (
             <div className="bg-[#121212] rounded-2xl border border-dashed border-white/10 py-16 px-6 text-center text-zinc-500 select-none">
@@ -2757,7 +3002,7 @@ export default function App() {
         </motion.div>
 
         {/* Right Column: AI Grounded Discovery & Transcoding progress */}
-        <div className="lg:col-span-5 flex flex-col gap-8">
+        <div className="lg:col-span-4 flex flex-col gap-6">
           
           {/* conversion Console Card (active triggers) */}
           {videoMetadata && (
@@ -2795,6 +3040,20 @@ export default function App() {
                   }
                 }}
               />
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {([
+                  ["Status", sessionHealth.status, sessionHealth.hasBackend ? "text-emerald-400" : "text-rose-400"],
+                  ["Queue Load", String(sessionHealth.queueLoad), "text-[#ffaa00]"],
+                  ["ZIP Cache", String(sessionHealth.cacheFiles), "text-sky-400"],
+                  ["Smart Mode", smartRecommendation.label, "text-purple-300"]
+                ] as const).map(([label, value, color]) => (
+                  <div key={label} className="bg-[#080808] border border-white/5 rounded-xl px-3 py-2 min-w-0">
+                    <span className="block text-[9px] uppercase tracking-widest font-mono text-zinc-600">{label}</span>
+                    <span className={`block text-[11px] font-bold truncate ${color}`}>{value}</span>
+                  </div>
+                ))}
+              </div>
 
               <div className="bg-[#080808] border border-white/5 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
@@ -2905,7 +3164,20 @@ export default function App() {
               )}
 
               {/* Technical steps output terminal */}
-              <ConsoleOutput logs={logs} />
+              <div className="flex flex-col gap-3">
+                <button
+                  type="button"
+                  onClick={() => togglePanel("console")}
+                  className="w-full flex items-center justify-between gap-3 px-4 py-3 bg-[#080808] hover:bg-[#0f0f0f] border border-white/5 rounded-xl text-left transition-all cursor-pointer"
+                >
+                  <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    <Activity className="w-3.5 h-3.5 text-[#ff4e00]" />
+                    Process Console ({logs.length})
+                  </span>
+                  {collapsedPanels.has("console") ? <ChevronDown className="w-4 h-4 text-zinc-500" /> : <ChevronUp className="w-4 h-4 text-zinc-500" />}
+                </button>
+                {!collapsedPanels.has("console") && <ConsoleOutput logs={logs} />}
+              </div>
 
             </div>
           )}
@@ -2947,7 +3219,7 @@ export default function App() {
           </div>
 
           <div className="flex flex-col items-start md:items-end gap-2 w-full md:w-auto">
-            <span className="text-zinc-600 text-[10px] uppercase tracking-widest font-mono">Sonic Stream v2.5</span>
+            <span className="text-zinc-600 text-[10px] uppercase tracking-widest font-mono">BAD N3WS Stream v3.0</span>
             <div className="flex gap-1">
               <div className="w-1 h-4 bg-[#ff4e00]"></div>
               <div className="w-1 h-6 bg-[#ff4e00]"></div>
@@ -3123,6 +3395,7 @@ export default function App() {
                   ["Space", "Play / Pause preview audio"],
                   ["Ctrl + Enter", "Convert & Download current track"],
                   ["Ctrl + Shift + Enter", "Process queue"],
+                  ["Ctrl + P", "Pause / resume queue starts"],
                   ["Esc", "Close modals"],
                   ["Ctrl + /", "Toggle this shortcut reference"],
                 ].map(([keys, desc]) => (
@@ -3206,14 +3479,3 @@ export default function App() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
